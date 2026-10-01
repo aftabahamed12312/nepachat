@@ -57,24 +57,35 @@ function Auth({ onAuth }) {
   );
 }
 
-function CallPanel({ callState, localStream, remoteStream, onAccept, onDecline, onHangup }) {
+function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChange, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
   useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
   useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
   if (!callState) return null;
   const label = callState.incoming ? `Incoming ${callState.kind} call` : callState.status === 'calling' ? 'Calling…' : callState.status === 'active' ? 'Connected' : 'Connecting…';
   return (
-    <div className="modal call-modal">
+    <div className={'call-shell call-shell-' + layout}>
       <section className="call-panel" aria-label="Call">
-        <header><div><b>{callState.peerName}</b><small>{label}</small></div></header>
-        {callState.error && <p className="err">{callState.error}</p>}
+        <header>
+          <div><b>{callState.peerName}</b><small>{label}</small></div>
+          {!callState.incoming && <div className="call-layout-actions">
+            {layout !== 'minimized' && <button className="call-action" title="Minimize call" aria-label="Minimize call" onClick={() => onLayoutChange('minimized')}>−</button>}
+            {layout === 'minimized'
+              ? <button className="call-action" title="Restore call" aria-label="Restore call" onClick={() => onLayoutChange('overlay')}>□</button>
+              : <button className="call-action" title={layout === 'split' ? 'Return to full call' : 'Split screen'} aria-label={layout === 'split' ? 'Return to full call' : 'Split screen'} onClick={() => onLayoutChange(layout === 'split' ? 'overlay' : 'split')}>▣</button>}
+          </div>}
+        </header>
+        {callState.error && <p className="err call-error">{callState.error}</p>}
         <div className={'call-stage' + (callState.kind === 'audio' ? ' audio-stage' : '')}>
           <video ref={remoteRef} autoPlay playsInline className="remote-video" />
           {callState.kind === 'audio' && <div className="audio-label">{callState.peerName}</div>}
           {callState.kind === 'video' && localStream && <video ref={localRef} autoPlay muted playsInline className="local-video" />}
         </div>
         <footer>
-          {callState.incoming ? <>
+          {layout === 'minimized' ? <>
+            <span className="call-mini-status">{label}</span>
+            {callState.incoming ? <button className="btn" onClick={onAccept}>Answer</button> : <button className="btn danger" onClick={onHangup}>End</button>}
+          </> : callState.incoming ? <>
             <button className="btn" onClick={onAccept}>Answer</button>
             <button className="btn danger" onClick={onDecline}>Decline</button>
           </> : <button className="btn danger" onClick={onHangup}>End call</button>}
@@ -120,6 +131,7 @@ export default function App() {
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [text, setText] = useState(''), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
+  const [callLayout, setCallLayout] = useState('overlay');
   const endRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]);
   activeRef.current = active;
   callRef.current = callState;
@@ -129,7 +141,7 @@ export default function App() {
   const clearCall = () => {
     peerRef.current?.close(); peerRef.current = null;
     localStreamRef.current?.getTracks().forEach(track => track.stop()); localStreamRef.current = null;
-    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setCallState(null); callRef.current = null;
+    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setCallState(null); setCallLayout('overlay'); callRef.current = null;
   };
   const endCall = reason => {
     const current = callRef.current;
@@ -156,7 +168,7 @@ export default function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
       const current = { chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id, peerName: '@' + active.other.username, kind, status: 'calling' };
       const peer = new RTCPeerConnection({ iceServers });
-      callRef.current = current; setCallState(current); localStreamRef.current = stream; setLocalStream(stream);
+      callRef.current = current; setCallState(current); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
       socketRef.current.emit('call:invite', { chatId: current.chatId, callId: current.callId, kind, offer: peer.localDescription });
@@ -174,7 +186,7 @@ export default function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: current.kind === 'video' });
       const peer = new RTCPeerConnection({ iceServers });
       const connecting = { ...current, incoming: false, status: 'connecting' };
-      callRef.current = connecting; setCallState(connecting); localStreamRef.current = stream; setLocalStream(stream);
+      callRef.current = connecting; setCallState(connecting); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       await peer.setRemoteDescription(current.offer);
       const candidates = pendingCandidatesRef.current.filter(item => item.callId === current.callId);
@@ -194,13 +206,22 @@ export default function App() {
     socketRef.current = s;
     s.on('message', ({ chatId, message, chat }) => {
       setChats(c => [chat, ...c.filter(x => x.id !== chatId)]);
+      if (message.from !== me.id) {
+        s.emit('message:delivered', { chatId, messageId: message.id });
+        if (activeRef.current?.id === chatId) s.emit('message:read', { chatId, messageId: message.id });
+      }
       if (activeRef.current?.id === chatId) setMessages(m => m.some(x => x.id === message.id) ? m : [...m, message]);
+    });
+    s.on('message:status', ({ chatId, messageId, status }) => {
+      if (activeRef.current?.id !== chatId) return;
+      const rank = { sent: 0, delivered: 1, read: 2 };
+      setMessages(list => list.map(message => message.id === messageId && rank[status] > rank[message.status || 'sent'] ? { ...message, status } : message));
     });
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
       pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId === incoming.callId);
       const next = { ...incoming, peerUserId: incoming.from.id, peerName: '@' + incoming.from.username, incoming: true, status: 'incoming' };
-      callRef.current = next; setCallState(next);
+      callRef.current = next; setCallState(next); setCallLayout('overlay');
     });
     s.on('call:signal', async ({ callId, signal }) => {
       if (signal.type === 'candidate' && !callRef.current) {
@@ -226,7 +247,14 @@ export default function App() {
   useEffect(() => {
     if (!active) return;
     setMessages([]);
-    call(`/chats/${active.id}/messages`, token).then(setMessages).catch(() => {});
+    call(`/chats/${active.id}/messages`, token).then(list => {
+      setMessages(list);
+      for (const message of list) {
+        if (message.from === me.id) continue;
+        socketRef.current?.emit('message:delivered', { chatId: active.id, messageId: message.id });
+        socketRef.current?.emit('message:read', { chatId: active.id, messageId: message.id });
+      }
+    }).catch(() => {});
   }, [active?.id]);
   useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
 
@@ -239,7 +267,7 @@ export default function App() {
   if (!auth) return <Auth onAuth={onAuth} />;
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   return (
-    <div className={'app' + (active ? ' open' : '')}>
+    <div className={'app' + (active ? ' open' : '') + (callLayout === 'split' ? ' call-split-active' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
@@ -270,7 +298,7 @@ export default function App() {
             <a className="mail" href={`mailto:${active.other.email}`} title="Send email">✉</a>
           </div>
           <div className="msgs">
-            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>{m.text}<i>{time(m.ts)}{m.from === me.id ? ' ✓' : ''}</i></div>)}
+            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>{m.text}<i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>)}
             <div ref={endRef} />
           </div>
           <div className="comp">
@@ -280,7 +308,7 @@ export default function App() {
         </>}
       </main>
       {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
-      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
+      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} layout={callLayout} onLayoutChange={setCallLayout} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );
 }

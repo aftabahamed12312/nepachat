@@ -7,7 +7,7 @@ Open http://localhost:5173 · API http://localhost:4000/api/health · MongoDB on
 
 Sign-up sends a six-digit email code that expires after 10 minutes. Local development enables `OTP_DEV_MODE=true`, which displays the code in the signup notice when no mail provider is configured. Keep this off outside local development. Render Free blocks outbound SMTP ports; Gmail can instead send through its HTTPS API using OAuth credentials.
 
-Features: verified accounts with username, email, and password; sign in by email or username; real-time chat; and one-to-one audio/video calls. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed). STUN is configured by default; set TURN credentials for more reliable calls across restrictive networks.
+Features: verified accounts with username, email, and password; real-time chat with sent, delivered, and read checks; one-to-one audio/video calls with minimize and split-screen controls; and installable phone PWA support. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed). STUN is configured by default; set TURN credentials for more reliable calls across restrictive networks.
 
 The local Docker setup seeds one verified demo account on first startup: `nepa_demo` / `nepa-demo@example.test` with password `local-demo-only-2026`. This fixed credential is for local development only. For a different seed, set `SEED_USERNAME`, `SEED_EMAIL`, and `SEED_PASSWORD`; the account is not modified on later starts. Never use the demo password in production. To seed a deployed API, configure those three Wrangler secrets separately.
 

@@ -217,19 +217,24 @@ app.post('/api/chats', auth, wrap(async (req, res) => {
 const member = async (cid, uid) => { const id = oid(cid); return id && chats.findOne({ _id: id, members: uid }); };
 
 app.get('/api/chats/:id/messages', auth, wrap(async (req, res) => {
-  if (!(await member(req.params.id, req.uid))) return res.status(404).json({ error: 'Chat not found' });
+  const chat = await member(req.params.id, req.uid);
+  if (!chat) return res.status(404).json({ error: 'Chat not found' });
+  const peerId = chat.members.find(id => id !== req.uid);
   const list = await msgs.find({ chatId: req.params.id }).sort({ ts: 1 }).limit(500).toArray();
-  res.json(list.map(m => ({ id: String(m._id), from: m.from, text: m.text, ts: m.ts })));
+  res.json(list.map(m => ({
+    id: String(m._id), from: m.from, text: m.text, ts: m.ts,
+    status: m.from === req.uid ? m.readBy?.includes(peerId) ? 'read' : m.deliveredTo?.includes(peerId) ? 'delivered' : 'sent' : undefined,
+  })));
 }));
 
 app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   const text = String(req.body.text || '').trim().slice(0, 2000);
   if (!chat || !text) return res.status(400).json({ error: 'Invalid message' });
-  const m = { chatId: req.params.id, from: req.uid, text, ts: Date.now() };
+  const m = { chatId: req.params.id, from: req.uid, text, ts: Date.now(), deliveredTo: [], readBy: [] };
   const r = await msgs.insertOne(m);
   await chats.updateOne({ _id: chat._id }, { $set: { last: text.slice(0, 80), ts: m.ts, by: req.uid } });
-  const message = { id: String(r.insertedId), from: m.from, text, ts: m.ts };
+  const message = { id: String(r.insertedId), from: m.from, text, ts: m.ts, status: 'sent' };
   for (const uid of chat.members) {
     io.to('u:' + uid).emit('message', { chatId: req.params.id, message, chat: await chatView({ ...chat, last: text.slice(0, 80), ts: m.ts, by: req.uid }, uid) });
   }
@@ -241,6 +246,24 @@ io.use((s, next) => {
 });
 io.on('connection', s => {
   s.join('u:' + s.uid);
+  const recordReceipt = async ({ chatId, messageId } = {}, status) => {
+    try {
+      const chat = typeof chatId === 'string' && await member(chatId, s.uid);
+      const id = oid(messageId);
+      if (!chat || !id) return;
+      const update = status === 'read'
+        ? { $addToSet: { deliveredTo: s.uid, readBy: s.uid } }
+        : { $addToSet: { deliveredTo: s.uid } };
+      const result = await msgs.updateOne({ _id: id, chatId, from: { $ne: s.uid } }, update);
+      if (!result.matchedCount) return;
+      const message = await msgs.findOne({ _id: id }, { projection: { from: 1, readBy: 1 } });
+      io.to('u:' + message.from).emit('message:status', {
+        chatId, messageId, status: message.readBy?.includes(s.uid) ? 'read' : 'delivered',
+      });
+    } catch (error) { console.error(error); }
+  };
+  s.on('message:delivered', payload => recordReceipt(payload, 'delivered'));
+  s.on('message:read', payload => recordReceipt(payload, 'read'));
   s.on('call:invite', async ({ chatId, callId, kind, offer } = {}) => {
     const chat = typeof chatId === 'string' && await member(chatId, s.uid);
     if (!chat || typeof callId !== 'string' || !['audio', 'video'].includes(kind) || offer?.type !== 'offer' || typeof offer.sdp !== 'string') return;
