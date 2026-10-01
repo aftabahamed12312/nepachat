@@ -62,13 +62,36 @@ function Auth({ onAuth, allowPublicSignUp }) {
 
 function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChange, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef(null);
   useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
   useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
+  useEffect(() => {
+    if (layout !== 'overlay' || !dragRef.current) return;
+    const onPointerMove = event => {
+      if (!dragRef.current) return;
+      const nextX = Math.min(220, Math.max(-220, dragRef.current.offsetX + (event.clientX - dragRef.current.startX)));
+      const nextY = Math.min(160, Math.max(-160, dragRef.current.offsetY + (event.clientY - dragRef.current.startY)));
+      setDragOffset({ x: nextX, y: nextY });
+    };
+    const onPointerUp = () => { dragRef.current = null; };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, [layout]);
   if (!callState) return null;
   const label = callState.incoming ? `Incoming ${callState.kind} call` : callState.status === 'calling' ? 'Calling…' : callState.status === 'active' ? 'Connected' : 'Connecting…';
+  const handleDragStart = event => {
+    if (layout !== 'overlay' || event.button !== 0 || event.target.closest('button')) return;
+    dragRef.current = { startX: event.clientX, startY: event.clientY, offsetX: dragOffset.x, offsetY: dragOffset.y };
+  };
+  const panelStyle = layout === 'overlay' ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 } : undefined;
   return (
     <div className={'call-shell call-shell-' + layout}>
-      <section className="call-panel" aria-label="Call">
+      <section className="call-panel" aria-label="Call" style={panelStyle} onPointerDown={handleDragStart}>
         <header>
           <div><b>{callState.peerName}</b><small>{label}</small></div>
           {!callState.incoming && <div className="call-layout-actions">

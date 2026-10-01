@@ -76,8 +76,9 @@ label input:focus,.sheet>input:focus,.search:focus{border-color:var(--blue)}
 .hits{margin:8px -18px 0;max-height:300px;overflow:auto}.hits p{padding:0 18px}
 .call-shell{z-index:10}
 .call-shell-overlay{position:fixed;inset:0;background:rgba(8,16,24,.82);display:grid;place-items:center;padding:16px}
-.call-panel{width:min(760px,100%);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 20px 70px rgba(0,0,0,.28)}
-.call-panel>header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:15px 18px;border-bottom:1px solid var(--line)}
+.call-panel{width:min(760px,100%);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 20px 70px rgba(0,0,0,.28);cursor:grab;user-select:none}
+.call-panel:active{cursor:grabbing}
+.call-panel>header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:15px 18px;border-bottom:1px solid var(--line);cursor:grab}
 .call-panel>header b,.call-panel>header small{display:block}
 .call-panel>footer{display:flex;justify-content:center;gap:10px;padding:14px}
 .call-layout-actions{display:flex;gap:6px;flex:none}
