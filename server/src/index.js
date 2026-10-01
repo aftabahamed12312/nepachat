@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import http from 'http';
+import path from 'node:path';
+import fs from 'node:fs/promises';
 import { Server } from 'socket.io';
 import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
@@ -42,12 +44,16 @@ app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
 app.use(express.json({ limit: '50kb' }));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') } });
+const localUploadsDir = path.resolve(process.cwd(), 'uploads');
+await fs.mkdir(localUploadsDir, { recursive: true });
 const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
+const mediaEnabled = true;
 const r2 = r2Configured ? new S3Client({
   region: 'auto',
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
 }) : null;
+app.use('/uploads', express.static(localUploadsDir, { index: false }));
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 const mailer = SMTP_HOST && SMTP_USER && SMTP_PASS ? nodemailer.createTransport({
   host: SMTP_HOST, port: Number(SMTP_PORT), secure: SMTP_SECURE === 'true',
@@ -137,11 +143,26 @@ async function notifyUser(userId, notification) {
   }));
 }
 
-async function messageView(message) {
-  const attachments = await Promise.all((message.attachments || []).map(async attachment => ({
-    ...attachment,
-    url: await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 }),
-  })));
+const attachmentUrlFromKey = (req, key) => {
+  const raw = String(key || '').replace(/^\/+/, '');
+  if (!raw) return '';
+  if (r2Configured) return `https://placeholder.invalid/${raw}`;
+  const host = req?.get('host');
+  const protocol = req?.secure ? 'https' : 'http';
+  const base = process.env.PUBLIC_MEDIA_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
+  return `${base.replace(/\/$/, '')}/uploads/${raw.replace(/^uploads\//, '')}`;
+};
+
+async function messageView(message, req) {
+  const attachments = await Promise.all((message.attachments || []).map(async attachment => {
+    const normalized = { ...attachment };
+    if (r2Configured) {
+      normalized.url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 });
+    } else {
+      normalized.url = attachmentUrlFromKey(req, attachment.key);
+    }
+    return normalized;
+  }));
   let replyTo = null;
   if (message.replyTo) {
     const parent = await msgs.findOne({ _id: oid(message.replyTo) }, { projection: { from: 1, text: 1, attachments: 1, ts: 1 } });
@@ -168,7 +189,7 @@ app.get('/api/health', (_, res) => res.json({ ok: true }));
 app.get('/api/config', (_, res) => res.json({
   allowPublicSignUp: !OWNER_EMAIL,
   vapidPublicKey: VAPID_PUBLIC_KEY || null,
-  mediaEnabled: r2Configured,
+  mediaEnabled: mediaEnabled,
 }));
 
 app.post('/api/register', wrap(async (req, res) => {
@@ -357,14 +378,24 @@ const mediaLimit = 25 * 1024 * 1024;
 app.put('/api/chats/:id/uploads', auth, express.raw({ type: [...mediaTypes], limit: mediaLimit }), wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
-  if (!r2Configured) return res.status(503).json({ error: 'Media storage is not configured' });
   const type = String(req.get('content-type') || '').split(';')[0].toLowerCase();
   if (!mediaTypes.has(type) || !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > mediaLimit) {
     return res.status(400).json({ error: 'Upload a supported image or video under 25 MB' });
   }
   const name = decodeURIComponent(String(req.get('x-file-name') || 'attachment')).replace(/[\r\n\\/]/g, '').slice(0, 120);
-  const key = `${req.params.id}/${req.uid}/${randomUUID()}`;
-  await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: req.body, ContentType: type }));
+  const extension = path.extname(name) || (type.startsWith('image/') ? '.png' : '.mp4');
+  let key = `${req.params.id}/${req.uid}/${randomUUID()}${extension}`;
+
+  if (r2Configured) {
+    await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: req.body, ContentType: type }));
+  } else {
+    const targetDir = path.join(localUploadsDir, req.params.id, req.uid);
+    await fs.mkdir(targetDir, { recursive: true });
+    const targetPath = path.join(targetDir, `${randomUUID()}${extension}`);
+    await fs.writeFile(targetPath, req.body);
+    key = path.posix.join(req.params.id, req.uid, path.basename(targetPath));
+  }
+
   res.status(201).json({ attachment: { key, type, name: name || 'attachment', size: req.body.length } });
 }));
 
@@ -433,7 +464,7 @@ app.get('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const peerId = chat.members.find(id => id !== req.uid);
   const list = await msgs.find({ chatId: req.params.id }).sort({ ts: 1 }).limit(500).toArray();
   res.json(await Promise.all(list.map(async m => ({
-    ...await messageView(m),
+    ...await messageView(m, req),
     status: m.from === req.uid ? m.readBy?.includes(peerId) ? 'read' : m.deliveredTo?.includes(peerId) ? 'delivered' : 'sent' : undefined,
   }))));
 }));
@@ -445,22 +476,31 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const replyTo = typeof req.body.replyTo === 'string' ? req.body.replyTo.trim() : '';
   if (!chat || (!text && !requestedAttachments.length) || requestedAttachments.length > 5) return res.status(400).json({ error: 'Invalid message' });
   if (replyTo && !await msgs.findOne({ _id: oid(replyTo), chatId: req.params.id })) return res.status(400).json({ error: 'Reply target not found' });
-  if (requestedAttachments.length && !r2Configured) return res.status(503).json({ error: 'Media storage is not configured' });
+  if (requestedAttachments.length && !mediaEnabled) return res.status(503).json({ error: 'Media storage is not configured' });
   const attachmentPrefix = `${req.params.id}/${req.uid}/`;
   const attachments = [];
   for (const item of requestedAttachments) {
     if (typeof item.key !== 'string' || !item.key.startsWith(attachmentPrefix) || !mediaTypes.has(item.type) || !Number.isInteger(item.size) || item.size < 1 || item.size > mediaLimit) {
       return res.status(400).json({ error: 'Invalid attachment' });
     }
-    const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: item.key }));
-    if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
+    if (r2Configured) {
+      const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: item.key }));
+      if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
+    } else {
+      const localFile = path.join(localUploadsDir, item.key);
+      try {
+        await fs.access(localFile);
+      } catch {
+        return res.status(400).json({ error: 'Attachment file was not found' });
+      }
+    }
     attachments.push({ key: item.key, type: item.type, name: String(item.name || 'attachment').slice(0, 120), size: item.size });
   }
   const m = { chatId: req.params.id, from: req.uid, text, attachments, ts: Date.now(), deliveredTo: [], readBy: [], replyTo: replyTo || null };
   const r = await msgs.insertOne(m);
   const preview = text || 'Shared media';
   await chats.updateOne({ _id: chat._id }, { $set: { last: preview.slice(0, 80), ts: m.ts, by: req.uid } });
-  const message = { ...await messageView({ ...m, _id: r.insertedId }), status: 'sent' };
+  const message = { ...await messageView({ ...m, _id: r.insertedId }, req), status: 'sent' };
   for (const uid of chat.members) {
     const chatViewForUser = await chatView({ ...chat, last: preview.slice(0, 80), ts: m.ts, by: req.uid }, uid);
     io.to('u:' + uid).emit('message', { chatId: req.params.id, message, chat: chatViewForUser });
