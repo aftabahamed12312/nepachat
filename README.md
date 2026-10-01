@@ -19,3 +19,21 @@ The local Docker setup seeds one verified demo account on first startup: `nepa_d
 5. From `web`, run `npm install`, `npx wrangler login`, and `npm run deploy`. This uploads the built static app to Cloudflare Pages project `nepachat`.
 
 The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. Configure `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` in Render for calls across restrictive networks.
+
+## Production Environment Template
+Add these values in Render's environment settings. Never put real database passwords, SMTP passwords, or tokens in this README, Git, or the Cloudflare frontend environment.
+
+```dotenv
+MONGO_URL=mongodb+srv://<database-user>:<url-encoded-password>@<cluster-host>/nepachat?retryWrites=true&w=majority&appName=Cluster0
+JWT_SECRET=<generated-by-render>
+CORS_ORIGIN=https://nepachat.pages.dev
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=<sender-email>
+SMTP_PASS=<gmail-app-password>
+SMTP_FROM=<sender-email>
+OTP_DEV_MODE=false
+```
+
+Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode any reserved characters in the database password. Rotate credentials if they have been shared or committed.
