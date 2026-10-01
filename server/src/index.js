@@ -6,7 +6,10 @@ import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
+import { setDefaultResultOrder } from 'node:dns';
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+
+setDefaultResultOrder('ipv4first');
 
 const {
   MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000,
@@ -31,6 +34,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') } });
 const mailer = SMTP_HOST && SMTP_USER && SMTP_PASS ? nodemailer.createTransport({
   host: SMTP_HOST, port: Number(SMTP_PORT), secure: SMTP_SECURE === 'true',
+  connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000,
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 }) : null;
 
