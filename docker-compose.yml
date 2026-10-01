@@ -1,0 +1,28 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes: [mongo-data:/data/db]
+    ports: ["127.0.0.1:27017:27017"]
+  server:
+    build: ./server
+    command: npm run dev
+    env_file: .env
+    environment:
+      MONGO_URL: mongodb://mongo:27017/nepachat
+      SEED_USERNAME: nepa_demo
+      SEED_EMAIL: nepa-demo@example.test
+      SEED_PASSWORD: local-demo-only-2026
+      OTP_DEV_MODE: "true"
+    volumes: ["./server/src:/app/src"]
+    ports: ["4000:4000"]
+    depends_on: [mongo]
+  web:
+    build: ./web
+    environment:
+      API_PROXY: http://server:4000
+    volumes: ["./web/src:/app/src", "./web/index.html:/app/index.html"]
+    ports: ["5173:5173"]
+    depends_on: [server]
+volumes:
+  mongo-data:

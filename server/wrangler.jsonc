@@ -1,0 +1,8 @@
+{
+  "name": "nepachat-api",
+  "main": "worker.js",
+  "compatibility_date": "2025-06-01",
+  "containers": [{ "class_name": "NepaApi", "image": "./Dockerfile", "max_instances": 3 }],
+  "durable_objects": { "bindings": [{ "name": "NEPA_API", "class_name": "NepaApi" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NepaApi"] }]
+}
