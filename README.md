@@ -7,7 +7,7 @@ Open http://localhost:5173 · API http://localhost:4000/api/health · MongoDB on
 
 Sign-up sends a six-digit email code that expires after 10 minutes. Local development enables `OTP_DEV_MODE=true`, which displays the code in the signup notice when no mail provider is configured. Keep this off outside local development. Render Free blocks outbound SMTP ports; Gmail can instead send through its HTTPS API using OAuth credentials.
 
-Features: verified accounts with username, email, and password; real-time chat with sent, delivered, and read checks; one-to-one audio/video calls with minimize and split-screen controls; and installable phone PWA support. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed). STUN is configured by default; set TURN credentials for more reliable calls across restrictive networks.
+Features: verified accounts with username, email, and password; real-time chat with sent, delivered, and read checks; R2-backed image/video attachments; one-to-one audio/video calls with minimize, split-screen, call history, and optional push alerts; opt-in, timed Google Maps live-location sharing; and installable phone PWA support. Location is visible only in its chat and automatically expires. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed); configure TURN for restrictive networks.
 
 The local Docker setup seeds one verified demo account on first startup: `nepa_demo` / `nepa-demo@example.test` with password `local-demo-only-2026`. This fixed credential is for local development only. For a different seed, set `SEED_USERNAME`, `SEED_EMAIL`, and `SEED_PASSWORD`; the account is not modified on later starts. Never use the demo password in production. To seed a deployed API, configure those three Wrangler secrets separately.
 
@@ -18,7 +18,11 @@ The local Docker setup seeds one verified demo account on first startup: `nepa_d
 4. Wait for the Render service health check, then confirm its URL, normally `https://nepachat-api.onrender.com`. Update `VITE_API_URL` in `web/.env.production` if Render assigned another URL.
 5. From `web`, run `npm install`, `npx wrangler login`, and `npm run deploy`. This uploads the built static app to Cloudflare Pages project `nepachat`.
 
-The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. Configure Cloudflare Realtime TURN in Render for calls across restrictive networks.
+The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. In production, set `OWNER_EMAIL=aftabaha12@gmail.com` in Render to enable owner-only account creation and disable public signup. The owner can create verified accounts from the **Create account** control in the app.
+
+Create a Cloudflare R2 bucket and S3 API token with object read/write permission for image/video attachments. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME` in Render. Uploads support images and MP4/WebM video up to 25 MB; downloads use signed URLs.
+
+For incoming-call notifications, generate VAPID keys with `npx web-push generate-vapid-keys` and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in Render. Users must tap **Enable call notifications** and grant browser permission. For reliable calls across restrictive networks, configure Cloudflare TURN as described below.
 
 ## Production Environment Template
 Add these values in Render's environment settings. Never put real database passwords, SMTP passwords, or tokens in this README, Git, or the Cloudflare frontend environment.
@@ -27,13 +31,25 @@ Add these values in Render's environment settings. Never put real database passw
 MONGO_URL=mongodb+srv://<database-user>:<url-encoded-password>@<cluster-host>/nepachat?retryWrites=true&w=majority&appName=Cluster0
 JWT_SECRET=<generated-by-render>
 CORS_ORIGIN=https://nepachat.pages.dev
+OWNER_EMAIL=aftabaha12@gmail.com
 GMAIL_OAUTH_CLIENT_ID=<google-oauth-client-id>
 GMAIL_OAUTH_CLIENT_SECRET=<google-oauth-client-secret>
 GMAIL_OAUTH_REFRESH_TOKEN=<google-oauth-refresh-token>
 GMAIL_FROM=aftabaha12@gmail.com
+R2_ACCOUNT_ID=<cloudflare-account-id>
+R2_ACCESS_KEY_ID=<r2-access-key-id>
+R2_SECRET_ACCESS_KEY=<r2-secret-access-key>
+R2_BUCKET_NAME=<r2-bucket-name>
+VAPID_PUBLIC_KEY=<web-push-public-key>
+VAPID_PRIVATE_KEY=<web-push-private-key>
+VAPID_SUBJECT=mailto:admin@nepachat.pages.dev
+TURN_KEY_ID=<cloudflare-turn-key-uid>
+TURN_API_TOKEN=<cloudflare-turn-key-secret>
 OTP_DEV_MODE=false
 ```
 
-Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
+Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Create the R2 bucket/access key, VAPID key pair, and Cloudflare TURN key before setting their corresponding secrets. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
 
 For reliable calls, create a Cloudflare Realtime TURN key in the Cloudflare dashboard. Set its returned `uid` as Render's `TURN_KEY_ID` and its returned `key` as `TURN_API_TOKEN`. The API requests fresh 48-hour ICE credentials for authenticated callers; the long-lived TURN key never reaches the browser. Cloudflare documents 1,000 GB of free TURN egress, with usage-based charges beyond that.
+
+Live Maps sharing is opt-in per chat, can be stopped by the sharer, and automatically expires after 15 minutes, 1 hour, or 8 hours. Location is available only to participants in that chat while the share is active.

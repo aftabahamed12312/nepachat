@@ -14,8 +14,9 @@ const call = async (path, token, method = 'GET', body) => {
 };
 const time = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const Avatar = ({ name, big }) => <div className={'avatar' + (big ? ' big' : '')}>{(name || '?')[0].toUpperCase()}</div>;
+const decodeVapidKey = value => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0));
 
-function Auth({ onAuth }) {
+function Auth({ onAuth, allowPublicSignUp }) {
   const [mode, setMode] = useState('login');
   const [f, setF] = useState({ username: '', email: '', password: '' });
   const [err, setErr] = useState(''), [notice, setNotice] = useState(''), [awaitingCode, setAwaitingCode] = useState(false), [code, setCode] = useState('');
@@ -51,7 +52,9 @@ function Auth({ onAuth }) {
         {notice && <div className="notice">{notice}</div>}
         <button className="btn">{mode === 'login' ? 'Sign in' : awaitingCode ? 'Verify and create account' : 'Send verification code'}</button>
         {mode === 'register' && awaitingCode && <button type="button" className="text-button" onClick={resend}>Send a new code</button>}
-        <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
+        {allowPublicSignUp
+          ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
+          : <p className="sw">Account creation is managed by the owner.</p>}
       </form>
     </div>
   );
@@ -126,18 +129,171 @@ function NewChat({ token, onClose, onOpen, me }) {
   );
 }
 
+function AdminCreateUser({ token, onClose }) {
+  const [fields, setFields] = useState({ username: '', email: '', password: '' });
+  const [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const set = key => event => setFields(current => ({ ...current, [key]: event.target.value }));
+  const create = async event => {
+    event.preventDefault(); setError(''); setNotice('');
+    try {
+      const result = await call('/admin/users', token, 'POST', fields);
+      setNotice(`Created @${result.user.username}. They can sign in now.`);
+      setFields({ username: '', email: '', password: '' });
+    } catch (requestError) { setError(requestError.message); }
+  };
+  return (
+    <div className="modal" onClick={onClose}>
+      <form className="sheet" onClick={event => event.stopPropagation()} onSubmit={create}>
+        <h3>Create account</h3>
+        <label>Username<input value={fields.username} onChange={set('username')} autoComplete="off" minLength={3} maxLength={20} required /></label>
+        <label>Email<input type="email" value={fields.email} onChange={set('email')} autoComplete="off" required /></label>
+        <label>Temporary password<input type="password" value={fields.password} onChange={set('password')} minLength={8} autoComplete="new-password" required /></label>
+        {error && <div className="err">{error}</div>}
+        {notice && <div className="notice">{notice}</div>}
+        <button className="btn" type="submit">Create account</button>
+        <button className="btn ghost" type="button" onClick={onClose}>Close</button>
+      </form>
+    </div>
+  );
+}
+
+function CallHistory({ token, onClose }) {
+  const [history, setHistory] = useState([]), [error, setError] = useState('');
+  useEffect(() => { call('/calls/history', token).then(setHistory).catch(requestError => setError(requestError.message)); }, [token]);
+  const label = item => item.status === 'missed' ? 'Missed' : item.status === 'declined' ? 'Declined' : item.status === 'cancelled' ? 'Cancelled' : item.status === 'ended' ? 'Ended' : item.status === 'active' ? 'Connected' : 'Ringing';
+  return (
+    <div className="modal" onClick={onClose}>
+      <section className="sheet history-sheet" onClick={event => event.stopPropagation()}>
+        <h3>Call history</h3>
+        {error && <p className="err">{error}</p>}
+        {!history.length && !error && <p className="muted">No calls yet.</p>}
+        <div className="history-list">{history.map(item => (
+          <div className="history-row" key={item.id}>
+            <Avatar name={item.other.username} />
+            <div className="grow"><b>@{item.other.username}</b><small>{item.direction === 'incoming' ? 'Incoming' : 'Outgoing'} {item.kind} · {label(item)}</small></div>
+            <time>{new Date(item.startedAt).toLocaleString()}</time>
+          </div>
+        ))}</div>
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </section>
+    </div>
+  );
+}
+
+function LocationShareDialog({ onStart, onClose }) {
+  const [duration, setDuration] = useState(3600), [error, setError] = useState('');
+  const start = async () => {
+    setError('');
+    try { await onStart(duration); }
+    catch (requestError) { setError(requestError.message || 'Could not get your location'); }
+  };
+  return (
+    <div className="modal" onClick={onClose}>
+      <section className="sheet" onClick={event => event.stopPropagation()}>
+        <h3>Share live location</h3>
+        <p className="muted">Your location is shared only with this chat and stops automatically when the timer ends. You can stop it sooner.</p>
+        <label>Share for<select value={duration} onChange={event => setDuration(Number(event.target.value))}>
+          <option value={900}>15 minutes</option><option value={3600}>1 hour</option><option value={28800}>8 hours</option>
+        </select></label>
+        {error && <div className="err">{error}</div>}
+        <button className="btn" onClick={start}>Share my location</button>
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
+  const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, mediaEnabled: false });
+  const [adminModal, setAdminModal] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [text, setText] = useState(''), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState([]), [composeError, setComposeError] = useState('');
+  const [locationShares, setLocationShares] = useState([]), [locationError, setLocationError] = useState('');
+  const [pushEnabled, setPushEnabled] = useState(false), [pushError, setPushError] = useState('');
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
   const [callLayout, setCallLayout] = useState('overlay');
-  const endRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]);
+  const endRef = useRef(), fileInputRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   activeRef.current = active;
   callRef.current = callState;
   const token = auth?.token, me = auth?.user;
-  const logout = () => { localStorage.removeItem('nepa'); setAuth(null); setChats([]); setActive(null); };
+  const stopLocationTracking = () => {
+    if (locationWatchRef.current !== null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
+    if (locationTimerRef.current !== null) window.clearTimeout(locationTimerRef.current);
+    locationWatchRef.current = null; locationTimerRef.current = null;
+  };
+  const logout = () => { stopLocationTracking(); localStorage.removeItem('nepa'); setAuth(null); setChats([]); setActive(null); setLocationShares([]); };
   const onAuth = d => { localStorage.setItem('nepa', JSON.stringify(d)); setAuth(d); };
+
+  useEffect(() => {
+    call('/config').then(config => {
+      setPublicConfig(config);
+      if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
+      if (config.vapidPublicKey && 'serviceWorker' in navigator && Notification.permission === 'granted') {
+        navigator.serviceWorker.ready.then(registration => registration.pushManager.getSubscription().then(subscription => setPushEnabled(Boolean(subscription)))).catch(() => {});
+      }
+    }).catch(() => {});
+  }, []);
+  const enableNotifications = async () => {
+    setPushError('');
+    try {
+      if (!publicConfig.vapidPublicKey) throw new Error('Call notifications are not configured yet');
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('Push notifications are not supported in this browser');
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') throw new Error('Allow notifications in your browser to receive call alerts');
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeVapidKey(publicConfig.vapidPublicKey) });
+      await call('/push/subscribe', token, 'POST', { subscription: subscription.toJSON() });
+      setPushEnabled(true);
+    } catch (error) { setPushError(error.message); }
+  };
+  const startLocationShare = async durationSeconds => {
+    if (!active || !navigator.geolocation) throw new Error('Location is not available in this browser');
+    if (locationWatchRef.current !== null || locationShares.some(share => share.ownerId === me.id)) throw new Error('Stop your existing live location share first');
+    const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }));
+    const share = await call(`/chats/${active.id}/location-shares`, token, 'POST', {
+      latitude: position.coords.latitude, longitude: position.coords.longitude, durationSeconds,
+    });
+    setLocationError('');
+    setLocationModal(false);
+    setLocationShares(current => [...current.filter(item => item.id !== share.id), share]);
+    lastLocationUpdateRef.current = Date.now();
+    locationWatchRef.current = navigator.geolocation.watchPosition(positionUpdate => {
+      const now = Date.now();
+      if (now - lastLocationUpdateRef.current < 5000) return;
+      lastLocationUpdateRef.current = now;
+      call(`/chats/${share.chatId}/location-shares/${share.id}`, token, 'PATCH', {
+        latitude: positionUpdate.coords.latitude, longitude: positionUpdate.coords.longitude,
+      }).then(updated => setLocationShares(current => current.map(item => item.id === updated.id ? updated : item))).catch(error => setLocationError(error.message));
+    }, error => setLocationError(error.message || 'Location updates are unavailable'), { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+    locationTimerRef.current = window.setTimeout(() => stopLocationShare(share), Math.max(0, share.expiresAt - Date.now()));
+  };
+  const stopLocationShare = async share => {
+    if (!share || share.ownerId !== me.id) return;
+    stopLocationTracking();
+    setLocationShares(current => current.filter(item => item.id !== share.id));
+    await call(`/chats/${share.chatId}/location-shares/${share.id}`, token, 'DELETE').catch(() => {});
+  };
+  const uploadAttachment = async (file, chatId) => {
+    if (!publicConfig.mediaEnabled) throw new Error('Chat media storage is not configured');
+    if (file.size > 25 * 1024 * 1024) throw new Error('Each image or video must be under 25 MB');
+    const response = await fetch(`${API}/api/chats/${chatId}/uploads`, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) },
+      body: file,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Upload failed');
+    return data.attachment;
+  };
+  const enablePush = async () => {
+    await enableNotifications();
+  };
+  const showCallHistory = () => {
+    setCallsOpen(true);
+    if (new URLSearchParams(window.location.search).has('callHistory')) history.replaceState(null, '', window.location.pathname);
+  };
   const clearCall = () => {
     peerRef.current?.close(); peerRef.current = null;
     localStreamRef.current?.getTracks().forEach(track => track.stop()); localStreamRef.current = null;
@@ -201,6 +357,12 @@ export default function App() {
 
   useEffect(() => {
     if (!token) return;
+    call('/me', token).then(user => setAuth(current => {
+      if (!current || current.user.role === user.role) return current;
+      const updated = { ...current, user };
+      localStorage.setItem('nepa', JSON.stringify(updated));
+      return updated;
+    })).catch(e => e.status === 401 && logout());
     call('/chats', token).then(setChats).catch(e => e.status === 401 && logout());
     const s = io(API || undefined, { auth: { token } });
     socketRef.current = s;
@@ -217,6 +379,8 @@ export default function App() {
       const rank = { sent: 0, delivered: 1, read: 2 };
       setMessages(list => list.map(message => message.id === messageId && rank[status] > rank[message.status || 'sent'] ? { ...message, status } : message));
     });
+    s.on('location:update', share => setLocationShares(current => [...current.filter(item => item.id !== share.id), share]));
+    s.on('location:stopped', ({ shareId }) => setLocationShares(current => current.filter(item => item.id !== shareId)));
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
       pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId === incoming.callId);
@@ -255,23 +419,33 @@ export default function App() {
         socketRef.current?.emit('message:read', { chatId: active.id, messageId: message.id });
       }
     }).catch(() => {});
+    call(`/chats/${active.id}/location-shares`, token).then(shares => setLocationShares(current => [...current.filter(item => item.chatId !== active.id), ...shares])).catch(() => {});
   }, [active?.id]);
   useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
 
   const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActive(c); };
   const send = async () => {
-    const t = text.trim(); if (!t || !active) return; setText('');
-    try { await call(`/chats/${active.id}/messages`, token, 'POST', { text: t }); } catch { setText(t); }
+    const t = text.trim(), files = attachedFiles.slice(), chat = active;
+    if ((!t && !files.length) || !chat) return;
+    setText(''); setAttachedFiles([]); setComposeError('');
+    try {
+      const attachments = await Promise.all(files.map(file => uploadAttachment(file, chat.id)));
+      await call(`/chats/${chat.id}/messages`, token, 'POST', { text: t, attachments });
+    } catch (error) { setText(t); setAttachedFiles(files); setComposeError(error.message); }
   };
 
-  if (!auth) return <Auth onAuth={onAuth} />;
+  if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} />;
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
+  const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
     <div className={'app' + (active ? ' open' : '') + (callLayout === 'split' ? ' call-split-active' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
         <small>@{me.username}</small>
+        {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
+        <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
+        {publicConfig.vapidPublicKey && <button className={'hbtn' + (pushEnabled ? ' push-on' : '')} title={pushEnabled ? 'Call notifications enabled' : 'Enable call notifications'} aria-label="Enable call notifications" onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>}
         <button className="hbtn" title="New chat" onClick={() => setModal(true)}>＋</button>
         <button className="hbtn" title="Sign out" onClick={logout}>⎋</button>
       </header>
@@ -293,21 +467,38 @@ export default function App() {
             <button className="back" onClick={() => setActive(null)}>←</button>
             <Avatar name={active.other.username} big />
             <div className="grow"><b>@{active.other.username}</b><small>{active.other.email}</small></div>
+            <button className="mail" title="Share live location" aria-label="Share live location" onClick={() => setLocationModal(true)}>⌖</button>
             <button className="mail" title="Start audio call" aria-label="Start audio call" onClick={() => startCall('audio')}>☎</button>
             <button className="mail" title="Start video call" aria-label="Start video call" onClick={() => startCall('video')}>▣</button>
             <a className="mail" href={`mailto:${active.other.email}`} title="Send email">✉</a>
           </div>
+          {visibleLocationShares.map(share => <div className="location-share" key={share.id}>
+            <div className="grow"><b>{share.ownerId === me.id ? 'You are sharing live location' : `@${share.ownerName} is sharing live location`}</b><small>Until {new Date(share.expiresAt).toLocaleTimeString()}</small></div>
+            <a href={share.mapsUrl} target="_blank" rel="noreferrer">Open in Maps</a>
+            {share.ownerId === me.id && <button className="text-button" onClick={() => stopLocationShare(share)}>Stop</button>}
+          </div>)}
+          {locationError && <div className="inline-error">{locationError}</div>}
           <div className="msgs">
-            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>{m.text}<i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>)}
+            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>{m.text}{m.attachments?.map(attachment => attachment.type.startsWith('image/')
+              ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
+              : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}<i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>)}
             <div ref={endRef} />
           </div>
+          {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => <span key={`${file.name}-${file.lastModified}`}>{file.name}<button aria-label={`Remove ${file.name}`} onClick={() => setAttachedFiles(current => current.filter((_, i) => i !== index))}>×</button></span>)}</div>}
+          {composeError && <div className="inline-error">{composeError}</div>}
           <div className="comp">
+            <input ref={fileInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple onChange={event => { setAttachedFiles(current => [...current, ...Array.from(event.target.files || []).slice(0, 5 - current.length)]); event.target.value = ''; }} />
+            <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}>▧</button>
             <textarea rows={1} value={text} placeholder="Type a message" onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
             <button className="send" onClick={send}>➤</button>
           </div>
         </>}
       </main>
       {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
+      {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
+      {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
+      {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
+      {pushError && <div className="push-error" role="status">{pushError}<button aria-label="Dismiss" onClick={() => setPushError('')}>×</button></div>}
       <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} layout={callLayout} onLayoutChange={setCallLayout} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );

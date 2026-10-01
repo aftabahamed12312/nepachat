@@ -27,3 +27,24 @@ self.addEventListener('fetch', event => {
     return response;
   })));
 });
+
+self.addEventListener('push', event => {
+  const payload = event.data?.json() || {};
+  event.waitUntil(self.registration.showNotification(payload.title || 'NepaChat', {
+    body: payload.body || 'You have a new call',
+    icon: '/icon.svg',
+    badge: '/icon.svg',
+    tag: payload.tag || 'nepachat-notification',
+    data: { url: payload.url || '/' },
+    vibrate: [150, 80, 150],
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || '/', self.location.origin).href;
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+    const existing = clients.find(client => new URL(client.url).origin === self.location.origin);
+    return existing ? existing.focus().then(client => client.navigate(target)) : self.clients.openWindow(target);
+  }));
+});
