@@ -13,7 +13,7 @@ const {
   CORS_ORIGIN = '*', SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE = 'false', SMTP_USER,
   SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
-  TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OTP_DEV_MODE = 'false',
+  TURN_KEY_ID, TURN_API_TOKEN, TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OTP_DEV_MODE = 'false',
 } = process.env;
 const client = new MongoClient(MONGO_URL);
 await client.connect();
@@ -183,13 +183,32 @@ app.get('/api/me', auth, wrap(async (req, res) => {
   u ? res.json(pub(u)) : res.status(401).json({ error: 'Unknown user' });
 }));
 
-app.get('/api/calls/ice-servers', auth, (_, res) => {
+app.get('/api/calls/ice-servers', auth, wrap(async (_, res) => {
+  if (TURN_KEY_ID && TURN_API_TOKEN) {
+    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(TURN_KEY_ID)}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl: 48 * 60 * 60 }),
+    });
+    if (!response.ok) {
+      console.error(`Cloudflare TURN credentials request failed with status ${response.status}`);
+      return res.status(503).json({ error: 'Call relay is temporarily unavailable' });
+    }
+    const { iceServers } = await response.json();
+    res.set('Cache-Control', 'no-store').json({
+      iceServers: iceServers.map(server => ({
+        ...server,
+        urls: Array.isArray(server.urls) ? server.urls.filter(url => !/:53(?:\?|$)/.test(url)) : server.urls,
+      })),
+    });
+    return;
+  }
   const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
   if (TURN_URL && TURN_USERNAME && TURN_CREDENTIAL) iceServers.push({
     urls: TURN_URL.split(',').map(url => url.trim()), username: TURN_USERNAME, credential: TURN_CREDENTIAL,
   });
-  res.json({ iceServers });
-});
+  res.set('Cache-Control', 'no-store').json({ iceServers });
+}));
 
 app.get('/api/users/search', auth, wrap(async (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase().replace(/^@/, '');

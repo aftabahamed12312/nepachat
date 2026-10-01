@@ -18,7 +18,7 @@ The local Docker setup seeds one verified demo account on first startup: `nepa_d
 4. Wait for the Render service health check, then confirm its URL, normally `https://nepachat-api.onrender.com`. Update `VITE_API_URL` in `web/.env.production` if Render assigned another URL.
 5. From `web`, run `npm install`, `npx wrangler login`, and `npm run deploy`. This uploads the built static app to Cloudflare Pages project `nepachat`.
 
-The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. Configure `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` in Render for calls across restrictive networks.
+The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. Configure Cloudflare Realtime TURN in Render for calls across restrictive networks.
 
 ## Production Environment Template
 Add these values in Render's environment settings. Never put real database passwords, SMTP passwords, or tokens in this README, Git, or the Cloudflare frontend environment.
@@ -35,3 +35,5 @@ OTP_DEV_MODE=false
 ```
 
 Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
+
+For reliable calls, create a Cloudflare Realtime TURN key in the Cloudflare dashboard. Set its returned `uid` as Render's `TURN_KEY_ID` and its returned `key` as `TURN_API_TOKEN`. The API requests fresh 48-hour ICE credentials for authenticated callers; the long-lived TURN key never reaches the browser. Cloudflare documents 1,000 GB of free TURN egress, with usage-based charges beyond that.

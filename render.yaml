@@ -37,5 +37,9 @@ services:
         sync: false
       - key: GMAIL_FROM
         sync: false
+      - key: TURN_KEY_ID
+        sync: false
+      - key: TURN_API_TOKEN
+        sync: false
       - key: OTP_DEV_MODE
         value: "false"
