@@ -374,15 +374,37 @@ const member = async (cid, uid) => { const id = oid(cid); return id && chats.fin
 
 const mediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm']);
 const mediaLimit = 25 * 1024 * 1024;
+const mediaTypeFromName = name => {
+  const extension = String(name || '').toLowerCase().split('.').pop();
+  switch (extension) {
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'webp':
+      return 'image/webp';
+    case 'gif':
+      return 'image/gif';
+    case 'mp4':
+      return 'video/mp4';
+    case 'webm':
+      return 'video/webm';
+    default:
+      return '';
+  }
+};
 
-app.put('/api/chats/:id/uploads', auth, express.raw({ type: [...mediaTypes], limit: mediaLimit }), wrap(async (req, res) => {
+app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
-  const type = String(req.get('content-type') || '').split(';')[0].toLowerCase();
+  const fileName = decodeURIComponent(String(req.get('x-file-name') || 'attachment')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  const declaredType = String(req.get('x-file-type') || req.get('content-type') || '').split(';')[0].toLowerCase();
+  const type = mediaTypes.has(declaredType) ? declaredType : mediaTypeFromName(fileName) || declaredType;
   if (!mediaTypes.has(type) || !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > mediaLimit) {
     return res.status(400).json({ error: 'Upload a supported image or video under 25 MB' });
   }
-  const name = decodeURIComponent(String(req.get('x-file-name') || 'attachment')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  const name = fileName || 'attachment';
   const extension = path.extname(name) || (type.startsWith('image/') ? '.png' : '.mp4');
   let key = `${req.params.id}/${req.uid}/${randomUUID()}${extension}`;
 

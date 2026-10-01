@@ -311,9 +311,19 @@ export default function App() {
   const uploadAttachment = async (file, chatId) => {
     if (!publicConfig.mediaEnabled) throw new Error('Chat media storage is not configured');
     if (file.size > 25 * 1024 * 1024) throw new Error('Each image or video must be under 25 MB');
+    const fileType = file.type || (() => {
+      const lowerName = String(file.name || '').toLowerCase();
+      if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
+      if (lowerName.endsWith('.png')) return 'image/png';
+      if (lowerName.endsWith('.webp')) return 'image/webp';
+      if (lowerName.endsWith('.gif')) return 'image/gif';
+      if (lowerName.endsWith('.mp4')) return 'video/mp4';
+      if (lowerName.endsWith('.webm')) return 'video/webm';
+      return 'application/octet-stream';
+    })();
     const response = await fetch(`${API}/api/chats/${chatId}/uploads`, {
       method: 'PUT',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) },
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': fileType, 'X-File-Type': fileType, 'X-File-Name': encodeURIComponent(file.name) },
       body: file,
     });
     const data = await response.json().catch(() => ({}));
