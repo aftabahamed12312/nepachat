@@ -5,7 +5,7 @@
     docker compose up --build
 Open http://localhost:5173 · API http://localhost:4000/api/health · MongoDB on :27017
 
-Sign-up sends a six-digit email code that expires after 10 minutes. Local development enables `OTP_DEV_MODE=true`, which displays the code in the signup notice when no mail provider is configured. Keep this off outside local development. Render Free blocks outbound SMTP ports, so use the Resend HTTPS API there; SMTP (including Gmail) requires a host that permits SMTP egress. For Gmail SMTP, use `smtp.gmail.com`, port `465`, secure `true`, and a Google App Password (not your account password).
+Sign-up sends a six-digit email code that expires after 10 minutes. Local development enables `OTP_DEV_MODE=true`, which displays the code in the signup notice when no mail provider is configured. Keep this off outside local development. Render Free blocks outbound SMTP ports; Gmail can instead send through its HTTPS API using OAuth credentials.
 
 Features: verified accounts with username, email, and password; sign in by email or username; real-time chat; and one-to-one audio/video calls. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed). STUN is configured by default; set TURN credentials for more reliable calls across restrictive networks.
 
@@ -27,9 +27,11 @@ Add these values in Render's environment settings. Never put real database passw
 MONGO_URL=mongodb+srv://<database-user>:<url-encoded-password>@<cluster-host>/nepachat?retryWrites=true&w=majority&appName=Cluster0
 JWT_SECRET=<generated-by-render>
 CORS_ORIGIN=https://nepachat.pages.dev
-RESEND_API_KEY=<resend-api-key>
-RESEND_FROM=NepaChat <no-reply@your-verified-domain.com>
+GMAIL_OAUTH_CLIENT_ID=<google-oauth-client-id>
+GMAIL_OAUTH_CLIENT_SECRET=<google-oauth-client-secret>
+GMAIL_OAUTH_REFRESH_TOKEN=<google-oauth-refresh-token>
+GMAIL_FROM=aftabaha12@gmail.com
 OTP_DEV_MODE=false
 ```
 
-Create a Resend account, verify a domain you control, and create an API key. Set `RESEND_API_KEY` and `RESEND_FROM` in Render; the sender must use the verified domain. Render Free cannot send Gmail SMTP traffic on ports `25`, `465`, or `587`. For paid hosts that allow SMTP, the SMTP variables above can be used instead. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
+Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.

@@ -12,6 +12,7 @@ const {
   MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000,
   CORS_ORIGIN = '*', SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE = 'false', SMTP_USER,
   SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
+  GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
   TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OTP_DEV_MODE = 'false',
 } = process.env;
 const client = new MongoClient(MONGO_URL);
@@ -35,6 +36,37 @@ const mailer = SMTP_HOST && SMTP_USER && SMTP_PASS ? nodemailer.createTransport(
   connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000,
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 }) : null;
+const gmailApiConfigured = Boolean(GMAIL_OAUTH_CLIENT_ID && GMAIL_OAUTH_CLIENT_SECRET && GMAIL_OAUTH_REFRESH_TOKEN && GMAIL_FROM);
+
+async function sendGmailOtp(to, code) {
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: GMAIL_OAUTH_CLIENT_ID,
+      client_secret: GMAIL_OAUTH_CLIENT_SECRET,
+      refresh_token: GMAIL_OAUTH_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!tokenResponse.ok) throw new Error(`Google OAuth token request failed with status ${tokenResponse.status}`);
+  const { access_token: accessToken } = await tokenResponse.json();
+  const mime = [
+    `From: ${GMAIL_FROM}`,
+    `To: ${to}`,
+    'Subject: Your NepaChat verification code',
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    `Your NepaChat verification code is ${code}. It expires in 10 minutes.`,
+  ].join('\r\n');
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw: Buffer.from(mime).toString('base64url') }),
+  });
+  if (!response.ok) throw new Error(`Gmail API send failed with status ${response.status}`);
+}
 
 const pub = u => ({ id: String(u._id), username: u.username, email: u.email });
 const sign = u => jwt.sign({ id: String(u._id) }, JWT_SECRET, { expiresIn: '30d' });
@@ -79,13 +111,15 @@ app.post('/api/register', wrap(async (req, res) => {
   if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   const resendConfigured = Boolean(RESEND_API_KEY && RESEND_FROM);
-  if (!mailer && !resendConfigured && OTP_DEV_MODE !== 'true') return res.status(503).json({ error: 'Email verification is not configured on this server' });
+  if (!mailer && !resendConfigured && !gmailApiConfigured && OTP_DEV_MODE !== 'true') return res.status(503).json({ error: 'Email verification is not configured on this server' });
   if (await users.findOne({ $or: [{ email }, { username }] })) return res.status(409).json({ error: 'Email or username already in use' });
   const existing = await pendingUsers.findOne({ email });
   if (existing && Date.now() - existing.lastSentAt < 60_000) return res.status(429).json({ error: 'Wait a minute before requesting another code' });
   const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
   const sentAt = Date.now();
-  if (resendConfigured) {
+  if (gmailApiConfigured) {
+    await sendGmailOtp(email, code);
+  } else if (resendConfigured) {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
@@ -104,7 +138,7 @@ app.post('/api/register', wrap(async (req, res) => {
     codeHash: createHmac('sha256', JWT_SECRET).update(email + ':' + code).digest('hex'),
     expiresAt: new Date(sentAt + 10 * 60_000), lastSentAt: sentAt, attempts: 0,
   } }, { upsert: true });
-  res.json({ ok: true, message: mailer || resendConfigured ? 'Verification code sent' : `Local verification code: ${code}` });
+  res.json({ ok: true, message: mailer || resendConfigured || gmailApiConfigured ? 'Verification code sent' : `Local verification code: ${code}` });
 }));
 
 app.post('/api/verify-email', wrap(async (req, res) => {

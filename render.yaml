@@ -29,5 +29,13 @@ services:
         sync: false
       - key: RESEND_FROM
         sync: false
+      - key: GMAIL_OAUTH_CLIENT_ID
+        sync: false
+      - key: GMAIL_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_OAUTH_REFRESH_TOKEN
+        sync: false
+      - key: GMAIL_FROM
+        sync: false
       - key: OTP_DEV_MODE
         value: "false"
