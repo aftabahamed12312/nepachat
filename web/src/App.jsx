@@ -67,7 +67,7 @@ function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChang
   useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
   useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
   useEffect(() => {
-    if (layout !== 'overlay' || !dragRef.current) return;
+    if (!['overlay', 'split'].includes(layout) || !dragRef.current) return;
     const onPointerMove = event => {
       if (!dragRef.current) return;
       const nextX = Math.min(220, Math.max(-220, dragRef.current.offsetX + (event.clientX - dragRef.current.startX)));
@@ -85,10 +85,14 @@ function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChang
   if (!callState) return null;
   const label = callState.incoming ? `Incoming ${callState.kind} call` : callState.status === 'calling' ? 'Calling…' : callState.status === 'active' ? 'Connected' : 'Connecting…';
   const handleDragStart = event => {
-    if (layout !== 'overlay' || event.button !== 0 || event.target.closest('button')) return;
+    if (!['overlay', 'split'].includes(layout) || event.button !== 0 || event.target.closest('button')) return;
     dragRef.current = { startX: event.clientX, startY: event.clientY, offsetX: dragOffset.x, offsetY: dragOffset.y };
   };
-  const panelStyle = layout === 'overlay' ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 } : undefined;
+  const panelStyle = layout === 'overlay'
+    ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 }
+    : layout === 'split'
+      ? { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }
+      : undefined;
   return (
     <div className={'call-shell call-shell-' + layout}>
       <section className="call-panel" aria-label="Call" style={panelStyle} onPointerDown={handleDragStart}>
@@ -485,7 +489,7 @@ export default function App() {
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
-    <div className={'app' + (active ? ' open' : '') + (callLayout === 'split' ? ' call-split-active' : '')}>
+    <div className={'app' + (active ? ' open' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
