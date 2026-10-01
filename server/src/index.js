@@ -6,15 +6,13 @@ import { MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
-import { setDefaultResultOrder } from 'node:dns';
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
-
-setDefaultResultOrder('ipv4first');
 
 const {
   MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000,
   CORS_ORIGIN = '*', SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE = 'false', SMTP_USER,
-  SMTP_PASS, SMTP_FROM, TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OTP_DEV_MODE = 'false',
+  SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
+  TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OTP_DEV_MODE = 'false',
 } = process.env;
 const client = new MongoClient(MONGO_URL);
 await client.connect();
@@ -80,13 +78,24 @@ app.post('/api/register', wrap(async (req, res) => {
   if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username: 3-20 letters, numbers or _' });
   if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-  if (!mailer && OTP_DEV_MODE !== 'true') return res.status(503).json({ error: 'Email verification is not configured on this server' });
+  const resendConfigured = Boolean(RESEND_API_KEY && RESEND_FROM);
+  if (!mailer && !resendConfigured && OTP_DEV_MODE !== 'true') return res.status(503).json({ error: 'Email verification is not configured on this server' });
   if (await users.findOne({ $or: [{ email }, { username }] })) return res.status(409).json({ error: 'Email or username already in use' });
   const existing = await pendingUsers.findOne({ email });
   if (existing && Date.now() - existing.lastSentAt < 60_000) return res.status(429).json({ error: 'Wait a minute before requesting another code' });
   const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
   const sentAt = Date.now();
-  if (mailer) await mailer.sendMail({
+  if (resendConfigured) {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: RESEND_FROM, to: [email], subject: 'Your NepaChat verification code',
+        text: `Your NepaChat verification code is ${code}. It expires in 10 minutes.`,
+      }),
+    });
+    if (!response.ok) throw new Error(`Email API request failed with status ${response.status}`);
+  } else if (mailer) await mailer.sendMail({
     from: SMTP_FROM || SMTP_USER, to: email, subject: 'Your NepaChat verification code',
     text: `Your NepaChat verification code is ${code}. It expires in 10 minutes.`,
   });
@@ -95,7 +104,7 @@ app.post('/api/register', wrap(async (req, res) => {
     codeHash: createHmac('sha256', JWT_SECRET).update(email + ':' + code).digest('hex'),
     expiresAt: new Date(sentAt + 10 * 60_000), lastSentAt: sentAt, attempts: 0,
   } }, { upsert: true });
-  res.json({ ok: true, message: mailer ? 'Verification code sent' : `Local verification code: ${code}` });
+  res.json({ ok: true, message: mailer || resendConfigured ? 'Verification code sent' : `Local verification code: ${code}` });
 }));
 
 app.post('/api/verify-email', wrap(async (req, res) => {
