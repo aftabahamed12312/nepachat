@@ -142,7 +142,20 @@ async function messageView(message) {
     ...attachment,
     url: await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 }),
   })));
-  return { id: String(message._id), from: message.from, text: message.text, ts: message.ts, attachments };
+  let replyTo = null;
+  if (message.replyTo) {
+    const parent = await msgs.findOne({ _id: oid(message.replyTo) }, { projection: { from: 1, text: 1, attachments: 1, ts: 1 } });
+    if (parent) {
+      replyTo = {
+        id: String(parent._id),
+        from: parent.from,
+        text: parent.text || 'Shared media',
+        ts: parent.ts,
+        attachments: (parent.attachments || []).map(item => ({ ...item })),
+      };
+    }
+  }
+  return { id: String(message._id), from: message.from, text: message.text, ts: message.ts, attachments, replyTo };
 }
 
 async function chatView(c, me) {
@@ -429,7 +442,9 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   const text = String(req.body.text || '').trim().slice(0, 2000);
   const requestedAttachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+  const replyTo = typeof req.body.replyTo === 'string' ? req.body.replyTo.trim() : '';
   if (!chat || (!text && !requestedAttachments.length) || requestedAttachments.length > 5) return res.status(400).json({ error: 'Invalid message' });
+  if (replyTo && !await msgs.findOne({ _id: oid(replyTo), chatId: req.params.id })) return res.status(400).json({ error: 'Reply target not found' });
   if (requestedAttachments.length && !r2Configured) return res.status(503).json({ error: 'Media storage is not configured' });
   const attachmentPrefix = `${req.params.id}/${req.uid}/`;
   const attachments = [];
@@ -441,13 +456,22 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
     if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
     attachments.push({ key: item.key, type: item.type, name: String(item.name || 'attachment').slice(0, 120), size: item.size });
   }
-  const m = { chatId: req.params.id, from: req.uid, text, attachments, ts: Date.now(), deliveredTo: [], readBy: [] };
+  const m = { chatId: req.params.id, from: req.uid, text, attachments, ts: Date.now(), deliveredTo: [], readBy: [], replyTo: replyTo || null };
   const r = await msgs.insertOne(m);
   const preview = text || 'Shared media';
   await chats.updateOne({ _id: chat._id }, { $set: { last: preview.slice(0, 80), ts: m.ts, by: req.uid } });
   const message = { ...await messageView({ ...m, _id: r.insertedId }), status: 'sent' };
   for (const uid of chat.members) {
-    io.to('u:' + uid).emit('message', { chatId: req.params.id, message, chat: await chatView({ ...chat, last: preview.slice(0, 80), ts: m.ts, by: req.uid }, uid) });
+    const chatViewForUser = await chatView({ ...chat, last: preview.slice(0, 80), ts: m.ts, by: req.uid }, uid);
+    io.to('u:' + uid).emit('message', { chatId: req.params.id, message, chat: chatViewForUser });
+    if (uid !== req.uid) {
+      await notifyUser(uid, {
+        title: 'New message',
+        body: text || 'Shared media',
+        tag: `message-${String(r.insertedId)}`,
+        url: '/?chat=' + req.params.id,
+      });
+    }
   }
   res.json(message);
 }));

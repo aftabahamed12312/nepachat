@@ -208,10 +208,11 @@ export default function App() {
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
-  const [text, setText] = useState(''), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
+  const [text, setText] = useState(''), [replyingTo, setReplyingTo] = useState(null), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]), [composeError, setComposeError] = useState('');
   const [locationShares, setLocationShares] = useState([]), [locationError, setLocationError] = useState('');
   const [pushEnabled, setPushEnabled] = useState(false), [pushError, setPushError] = useState('');
+  const [alerts, setAlerts] = useState([]);
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
   const [callLayout, setCallLayout] = useState('overlay');
   const endRef = useRef(), fileInputRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
@@ -235,6 +236,11 @@ export default function App() {
       }
     }).catch(() => {});
   }, []);
+  const addAlert = (message, kind = 'info') => {
+    const next = { id: `${Date.now()}-${Math.random()}`, message, kind };
+    setAlerts(current => [...current, next]);
+    window.setTimeout(() => setAlerts(current => current.filter(item => item.id !== next.id)), 4000);
+  };
   const enableNotifications = async () => {
     setPushError('');
     try {
@@ -246,7 +252,11 @@ export default function App() {
       const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeVapidKey(publicConfig.vapidPublicKey) });
       await call('/push/subscribe', token, 'POST', { subscription: subscription.toJSON() });
       setPushEnabled(true);
-    } catch (error) { setPushError(error.message); }
+      addAlert('Call notifications enabled', 'success');
+    } catch (error) {
+      setPushError(error.message);
+      addAlert(error.message, 'error');
+    }
   };
   const startLocationShare = async durationSeconds => {
     if (!active || !navigator.geolocation) throw new Error('Location is not available in this browser');
@@ -371,6 +381,7 @@ export default function App() {
       if (message.from !== me.id) {
         s.emit('message:delivered', { chatId, messageId: message.id });
         if (activeRef.current?.id === chatId) s.emit('message:read', { chatId, messageId: message.id });
+        addAlert(`New message from @${chat.other.username}`, 'info');
       }
       if (activeRef.current?.id === chatId) setMessages(m => m.some(x => x.id === message.id) ? m : [...m, message]);
     });
@@ -386,6 +397,7 @@ export default function App() {
       pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId === incoming.callId);
       const next = { ...incoming, peerUserId: incoming.from.id, peerName: '@' + incoming.from.username, incoming: true, status: 'incoming' };
       callRef.current = next; setCallState(next); setCallLayout('overlay');
+      addAlert(`Incoming ${incoming.kind} call from @${incoming.from.username}`, 'info');
     });
     s.on('call:signal', async ({ callId, signal }) => {
       if (signal.type === 'candidate' && !callRef.current) {
@@ -427,11 +439,13 @@ export default function App() {
   const send = async () => {
     const t = text.trim(), files = attachedFiles.slice(), chat = active;
     if ((!t && !files.length) || !chat) return;
-    setText(''); setAttachedFiles([]); setComposeError('');
+    const payload = { text: t, attachments: [], replyTo: replyingTo?.id || null };
+    setText(''); setAttachedFiles([]); setReplyingTo(null); setComposeError('');
     try {
       const attachments = await Promise.all(files.map(file => uploadAttachment(file, chat.id)));
-      await call(`/chats/${chat.id}/messages`, token, 'POST', { text: t, attachments });
-    } catch (error) { setText(t); setAttachedFiles(files); setComposeError(error.message); }
+      payload.attachments = attachments;
+      await call(`/chats/${chat.id}/messages`, token, 'POST', payload);
+    } catch (error) { setText(t); setAttachedFiles(files); setReplyingTo(replyingTo); setComposeError(error.message); }
   };
 
   if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} />;
@@ -479,17 +493,23 @@ export default function App() {
           </div>)}
           {locationError && <div className="inline-error">{locationError}</div>}
           <div className="msgs">
-            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>{m.text}{m.attachments?.map(attachment => attachment.type.startsWith('image/')
-              ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
-              : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}<i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>)}
+            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>
+              {m.replyTo && <div className="reply-chunk"><span>Replying to @{m.replyTo.from === me.id ? 'you' : active.other.username}</span><div>{m.replyTo.text || 'Shared media'}</div></div>}
+              {m.text}
+              {m.attachments?.map(attachment => attachment.type.startsWith('image/')
+                ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
+                : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}
+              <div className="msg-actions"><button className="mini-action" onClick={() => setReplyingTo(m)}>Reply</button><i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>
+            </div>)}
             <div ref={endRef} />
           </div>
           {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => <span key={`${file.name}-${file.lastModified}`}>{file.name}<button aria-label={`Remove ${file.name}`} onClick={() => setAttachedFiles(current => current.filter((_, i) => i !== index))}>×</button></span>)}</div>}
+          {replyingTo && <div className="reply-box"><div className="reply-meta">Replying to @{messages.find(item => item.id === replyingTo.id)?.from === me.id ? 'you' : active.other.username}</div><div className="reply-preview">{replyingTo.text || 'Shared media'}</div><button className="text-button" onClick={() => setReplyingTo(null)}>Cancel</button></div>}
           {composeError && <div className="inline-error">{composeError}</div>}
           <div className="comp">
             <input ref={fileInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple onChange={event => { setAttachedFiles(current => [...current, ...Array.from(event.target.files || []).slice(0, 5 - current.length)]); event.target.value = ''; }} />
             <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}>▧</button>
-            <textarea rows={1} value={text} placeholder="Type a message" onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+            <textarea rows={1} value={text} placeholder={replyingTo ? 'Reply to the message…' : 'Type a message'} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
             <button className="send" onClick={send}>➤</button>
           </div>
         </>}
@@ -499,6 +519,11 @@ export default function App() {
       {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
       {pushError && <div className="push-error" role="status">{pushError}<button aria-label="Dismiss" onClick={() => setPushError('')}>×</button></div>}
+      {alerts.length > 0 && (
+        <div className="alert-stack" aria-live="polite" aria-atomic="true">
+          {alerts.map(alert => <div key={alert.id} className={'alert-item alert-' + alert.kind}>{alert.message}</div>)}
+        </div>
+      )}
       <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} layout={callLayout} onLayoutChange={setCallLayout} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );
