@@ -59,51 +59,10 @@ const getDeviceName = () => {
 };
 
 function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
-  const onAuthRef = useRef(onAuth);
-  onAuthRef.current = onAuth;
   const [mode, setMode] = useState('login');
   const [f, setF] = useState({ username: '', email: '', password: '' });
   const [err, setErr] = useState(''), [notice, setNotice] = useState(''), [awaitingCode, setAwaitingCode] = useState(false), [code, setCode] = useState('');
-  const [pairing, setPairing] = useState(null), [pairingQr, setPairingQr] = useState(''), [pairingError, setPairingError] = useState('');
   const set = k => e => setF({ ...f, [k]: e.target.value });
-  useEffect(() => {
-    if (!pairing) return undefined;
-    let cancelled = false, checking = false;
-    let timer;
-    import('qrcode').then(({ default: QRCode }) =>
-      QRCode.toDataURL(JSON.stringify({ type: 'nepachat-device-link', requestId: pairing.requestId, secret: pairing.secret, deviceName: pairing.deviceName }), { margin: 2, width: 260 }),
-    ).then(source => { if (!cancelled) setPairingQr(source); })
-      .catch(error => { if (!cancelled) setPairingError(`Could not create a QR code: ${error.message}`); });
-    const checkStatus = async () => {
-      if (cancelled || checking) return;
-      checking = true;
-      try {
-        const result = await call(`/devices/pairing/${pairing.requestId}/claim`, null, 'POST', { secret: pairing.secret });
-        if (result.status === 'approved') {
-          if (!cancelled) onAuthRef.current(result);
-          return;
-        }
-      } catch (error) {
-        if (!cancelled) setPairingError(error.message);
-        if (error.status === 410) return;
-      } finally {
-        checking = false;
-      }
-      if (!cancelled) timer = window.setTimeout(checkStatus, 2000);
-    };
-    timer = window.setTimeout(checkStatus, 2000);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [pairing]);
-  const startPairing = async () => {
-    setPairingError('');
-    setPairingQr('');
-    try {
-      const request = await call('/devices/pairing', null, 'POST', { deviceId: getDeviceId(), deviceName: getDeviceName() });
-      setPairing(request);
-    } catch (error) {
-      setPairingError(error.message);
-    }
-  };
   const authenticateDevice = async (path, credentials) => {
     const device = { deviceId: getDeviceId(), deviceName: getDeviceName() };
     try {
@@ -137,19 +96,6 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
     try { const d = await call('/register', null, 'POST', f); setNotice(d.message); }
     catch (x) { setErr(x.message); }
   };
-  if (pairing) return (
-    <div className="auth">
-      <header className="top"><b>Nepa<span>Chat</span></b></header>
-      <section className="card pairing-card">
-        <h2>Link this device</h2>
-        <p>On a device already signed in to NepaChat, open <b>Linked devices</b> and scan this code.</p>
-        {pairingQr ? <img className="pairing-qr" src={pairingQr} alt="QR code to link this device" /> : <p className="muted">Preparing secure QR code…</p>}
-        <p className="muted">This code expires in five minutes. Keep it private.</p>
-        {pairingError && <div className="err">{pairingError}</div>}
-        <button className="btn ghost" onClick={() => { setPairing(null); setPairingQr(''); setPairingError(''); }}>Cancel</button>
-      </section>
-    </div>
-  );
   return (
     <div className="auth">
       <header className="top"><b>Nepa<span>Chat</span></b></header>
@@ -168,7 +114,6 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
         {allowPublicSignUp
           ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
           : <p className="sw">Account creation is managed by the owner.</p>}
-        {mode === 'login' && <button type="button" className="text-button" onClick={startPairing}>Or link this device with a QR code</button>}
       </form>
     </div>
   );
@@ -177,12 +122,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
 function LinkedDevices({ token, onClose, onAlert }) {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
-  const [scanRequest, setScanRequest] = useState(null);
   const [error, setError] = useState('');
-  const videoRef = useRef(null);
-  const controlsRef = useRef(null);
-  const handledScanRef = useRef(false);
   const refresh = async () => {
     setLoading(true);
     setError('');
@@ -195,62 +135,12 @@ function LinkedDevices({ token, onClose, onAlert }) {
     }
   };
   useEffect(() => { refresh(); }, [token]);
-  useEffect(() => {
-    if (!scanning) return undefined;
-    let cancelled = false;
-    handledScanRef.current = false;
-    import('@zxing/browser').then(({ BrowserMultiFormatReader }) => {
-      if (cancelled) return undefined;
-      const reader = new BrowserMultiFormatReader();
-      return reader.decodeFromVideoDevice(undefined, videoRef.current, async result => {
-        if (!result || cancelled || handledScanRef.current) return;
-        handledScanRef.current = true;
-        controlsRef.current?.stop();
-        setScanning(false);
-        try {
-          const parsed = JSON.parse(result.getText());
-          if (parsed.type !== 'nepachat-device-link' || typeof parsed.requestId !== 'string' || typeof parsed.secret !== 'string') {
-            throw new Error('That QR code is not a NepaChat device link.');
-          }
-          setScanRequest(parsed);
-        } catch (requestError) {
-          setError(requestError.message || 'Could not link this device');
-        }
-      });
-    }).then(controls => {
-      if (!controls) return;
-      controlsRef.current = controls;
-      if (cancelled) controls.stop();
-    }).catch(requestError => {
-      if (!cancelled) {
-        setScanning(false);
-        setError(requestError.message || 'Could not open the camera. Allow camera access and try again.');
-      }
-    });
-    return () => {
-      cancelled = true;
-      controlsRef.current?.stop();
-      controlsRef.current = null;
-    };
-  }, [scanning, token]);
   const revokeDevice = async device => {
     setError('');
     try {
       await call(`/devices/${device.id}`, token, 'DELETE');
       setDevices(current => current.filter(item => item.id !== device.id));
       onAlert(`${device.name} was unlinked`, 'success');
-    } catch (requestError) {
-      setError(requestError.message);
-    }
-  };
-  const approveScannedDevice = async () => {
-    if (!scanRequest) return;
-    setError('');
-    try {
-      await call(`/devices/pairings/${scanRequest.requestId}/approve`, token, 'POST', { secret: scanRequest.secret });
-      setScanRequest(null);
-      await refresh();
-      onAlert('Device linked successfully', 'success');
     } catch (requestError) {
       setError(requestError.message);
     }
@@ -262,16 +152,8 @@ function LinkedDevices({ token, onClose, onAlert }) {
           <h3 id="linked-devices-title">Linked devices</h3>
           <button aria-label="Close linked devices" onClick={onClose}>×</button>
         </div>
-        <p className="muted">Use NepaChat on up to four companion devices. Scan a device's QR code here to approve it.</p>
+        <p className="muted">Sign in on another device with your account email or username and password. You can use NepaChat on up to four companion devices.</p>
         {error && <p className="err">{error}</p>}
-        {scanRequest ? <>
-          <p>Approve linking <b>{scanRequest.deviceName || 'this device'}</b> to your account?</p>
-          <button className="btn" onClick={approveScannedDevice}>Approve device link</button>
-          <button className="btn ghost" onClick={() => setScanRequest(null)}>Cancel</button>
-        </> : scanning ? <>
-          <video ref={videoRef} className="device-scanner-video" muted playsInline />
-          <button className="btn ghost" onClick={() => setScanning(false)}>Cancel scan</button>
-        </> : <button className="btn" onClick={() => { setError(''); setScanning(true); }}>Scan QR code to link a device</button>}
         <h4>Your devices</h4>
         {loading && <p className="muted">Loading devices…</p>}
         {!loading && !devices.length && <p className="muted">No active devices found.</p>}

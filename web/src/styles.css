@@ -57,9 +57,6 @@ small{color:var(--mu);font-size:13px}.row em{font-style:normal;font-size:12px;co
 .profile-picture-label small{font-weight:400}
 .profile-password-note{margin:0;font-size:13px}
 .activity-back{display:none}
-.pairing-card{text-align:center;align-items:center}
-.pairing-card p{margin:0}
-.pairing-qr{width:min(260px,100%);height:auto;image-rendering:pixelated}
 .linked-devices-modal{z-index:28}
 .linked-devices-sheet{max-width:560px;gap:12px}
 .linked-devices-heading{display:flex;align-items:center;justify-content:space-between}
