@@ -34,7 +34,7 @@ const call = async (path, token, method = 'GET', body) => {
 const time = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const Avatar = ({ name, big, avatarPath }) => (
   <div className={'avatar' + (big ? ' big' : '')}>
-    {avatarPath && <img src={API + avatarPath} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
+    {avatarPath && <img key={avatarPath} src={API + avatarPath} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
     <span>{(name || '?')[0].toUpperCase()}</span>
   </div>
 );
@@ -118,7 +118,13 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
     e.preventDefault(); setErr(''); setNotice('');
     try {
       if (mode === 'login') onAuth(await authenticateDevice('/login', { email: f.email, password: f.password }));
-      else if (awaitingCode) onAuth(await authenticateDevice('/verify-email', { email: f.email, code }));
+      else if (awaitingCode) {
+        await call('/verify-email', null, 'POST', { email: f.email, code });
+        setMode('login');
+        setAwaitingCode(false);
+        setCode('');
+        setNotice('Email verified. Sign in with your new account.');
+      }
       else {
         const d = await call('/register', null, 'POST', f);
         setAwaitingCode(true); setNotice(d.message); setCode('');
@@ -659,7 +665,7 @@ function ProfileSettings({ me, token, onClose, onUpdated }) {
         <div className="profile-heading"><h3>Profile settings</h3><button type="button" aria-label="Close profile settings" disabled={saving} onClick={onClose}>×</button></div>
         <div className="profile-picture-setting">
           <div className="avatar profile-avatar">
-            {(preview || me.avatarPath) && <img src={preview || (API + me.avatarPath)} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
+            {(preview || me.avatarPath) && <img key={preview || me.avatarPath} src={preview || (API + me.avatarPath)} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
             <span>{(username || '?')[0].toUpperCase()}</span>
           </div>
           <label className="profile-picture-label">Profile picture

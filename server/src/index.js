@@ -394,8 +394,6 @@ app.post('/api/register', wrap(async (req, res) => {
 }));
 
 app.post('/api/verify-email', wrap(async (req, res) => {
-  const device = deviceInput(req.body, res);
-  if (!device) return;
   const email = String(req.body.email || '').trim().toLowerCase();
   const code = String(req.body.code || '').trim();
   if (!emailRx.test(email) || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the six-digit code sent to your email' });
@@ -415,10 +413,9 @@ app.post('/api/verify-email', wrap(async (req, res) => {
     return res.status(400).json({ error: 'That verification code is incorrect' });
   }
   try {
-    const r = await users.insertOne({ username: pending.username, email, hash: pending.hash, created: Date.now(), verified: true });
+    await users.insertOne({ username: pending.username, email, hash: pending.hash, created: Date.now(), verified: true });
     await pendingUsers.deleteOne({ _id: pending._id });
-    const u = { _id: r.insertedId, username: pending.username, email };
-    await loginWithDevice(res, u, device);
+    res.json({ ok: true, message: 'Email verified. Sign in with your new account.' });
   } catch (e) {
     if (e.code === 11000) return res.status(409).json({ error: 'Email or username already in use' });
     throw e;
@@ -577,7 +574,7 @@ app.get('/api/admin/users', auth, admin, wrap(async (req, res) => {
   const filter = query
     ? { $or: ['username', 'email'].map(field => ({ [field]: { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } })) }
     : {};
-  const projection = { username: 1, email: 1, role: 1, created: 1, verified: 1 };
+  const projection = { username: 1, email: 1, role: 1, created: 1, verified: 1, avatarKey: 1 };
   const [list, total] = await Promise.all([
     users.find(filter, { projection }).sort({ created: -1, _id: -1 }).skip(offset).limit(50).toArray(),
     users.countDocuments(filter),
@@ -586,6 +583,7 @@ app.get('/api/admin/users', auth, admin, wrap(async (req, res) => {
     users: list.map(user => ({
       id: String(user._id), username: user.username, email: user.email,
       role: user.role || 'user', created: user.created || null, verified: Boolean(user.verified),
+      avatarPath: pub(user).avatarPath,
     })),
     total,
     offset,
