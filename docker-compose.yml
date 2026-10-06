@@ -15,6 +15,7 @@ services:
       SEED_PASSWORD: local-demo-only-2026
       OTP_DEV_MODE: "true"
       UPLOADS_DIR: /app/uploads
+      UPLOADS_PERSISTENT: "true"
     volumes: ["./server/src:/app/src", "chat-uploads:/app/uploads"]
     ports: ["4000:4000"]
     depends_on: [mongo]

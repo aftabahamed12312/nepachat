@@ -38,6 +38,80 @@ const Avatar = ({ name, big, avatarPath }) => (
     <span>{(name || '?')[0].toUpperCase()}</span>
   </div>
 );
+function ActivityMediaItem({ attachment, onRefresh }) {
+  const [url, setUrl] = useState(attachment.url);
+  const [status, setStatus] = useState('loading');
+  const [attempt, setAttempt] = useState(0);
+  const refreshing = useRef(false);
+  useEffect(() => {
+    setUrl(attachment.url);
+    setStatus('loading');
+    setAttempt(0);
+    refreshing.current = false;
+  }, [attachment.url]);
+  const retry = async automatic => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    setStatus('refreshing');
+    try {
+      const freshUrl = await onRefresh();
+      if (freshUrl && freshUrl !== url) {
+        setUrl(freshUrl);
+        setAttempt(0);
+        setStatus('loading');
+      } else if (automatic) {
+        setStatus('error');
+      } else {
+        setAttempt(current => current + 1);
+        setStatus('loading');
+      }
+    } catch {
+      setStatus('error');
+    } finally {
+      refreshing.current = false;
+    }
+  };
+  const onMediaError = () => {
+    if (!refreshing.current && status !== 'error') retry(true);
+  };
+  return (
+    <div className="activity-media-item">
+      {status === 'error'
+        ? <div className="activity-media-error" role="status">
+          <span>Media couldn’t be loaded. It may be temporarily unavailable.</span>
+          <button type="button" onClick={() => retry(false)}>Try again</button>
+        </div>
+        : attachment.type.startsWith('image/')
+          ? <a href={url} target="_blank" rel="noreferrer"><img key={`${url}-${attempt}`} src={url} alt={attachment.name || 'Activity photo'} loading="lazy" onLoad={() => setStatus('ready')} onError={onMediaError} /></a>
+          : <video key={`${url}-${attempt}`} src={url} controls playsInline preload="metadata" onLoadedData={() => setStatus('ready')} onError={onMediaError} />}
+      {status === 'refreshing' && <span className="activity-media-refreshing" role="status">Restoring media…</span>}
+    </div>
+  );
+}
+function ActivityFilePreview({ file, progress, onRemove, disabled }) {
+  const [previewUrl, setPreviewUrl] = useState('');
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  const isImage = mediaTypeFromFile(file).startsWith('image/');
+  return (
+    <div className="activity-file-preview">
+      {previewUrl
+        ? isImage
+          ? <img src={previewUrl} alt={`Preview of ${file.name}`} />
+          : <video src={previewUrl} muted playsInline preload="metadata" aria-label={`Preview of ${file.name}`} />
+        : <div className="activity-file-preview-loading">Preparing preview…</div>}
+      <div className="activity-file-preview-info">
+        <b>{file.name}</b>
+        <small>{(file.size / (1024 * 1024)).toFixed(1)} MB{progress !== undefined ? ` · Uploading ${progress}%` : ''}</small>
+        {progress !== undefined && <progress max="100" value={progress} aria-label={`Uploading ${file.name}`} />}
+      </div>
+      <button type="button" disabled={disabled} aria-label={`Remove ${file.name}`} onClick={onRemove}>×</button>
+    </div>
+  );
+}
 const decodeVapidKey = value => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0));
 const getDeviceId = () => {
   const key = 'nepachat-device-id';
@@ -1348,6 +1422,14 @@ export default function App() {
       setPostingActivity(false);
     }
   };
+  const refreshActivityAttachment = async (postId, attachmentKey) => {
+    const posts = await call('/activity/posts', token);
+    const updatedPost = posts.find(post => post.id === postId);
+    const updatedAttachment = updatedPost?.attachments?.find(item => item.key === attachmentKey);
+    if (!updatedAttachment?.url) throw new Error('This media is no longer available.');
+    setActivityPosts(current => current.map(post => post.id === postId ? updatedPost : post));
+    return updatedAttachment.url;
+  };
   const handleFilesSelected = fileList => {
     if (sendingRef.current) {
       setComposeError('Wait for the current message to finish sending before adding files.');
@@ -1547,9 +1629,8 @@ export default function App() {
             {activityPosts.map(post => <article className="activity-post" key={post.id}>
               <header><Avatar name={post.author.username} avatarPath={post.author.avatarPath} /><div><b>{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
               {post.text && <p className="activity-post-text">{post.text}</p>}
-              {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment => attachment.type.startsWith('image/')
-                ? <a href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img src={attachment.url} alt={attachment.name} loading="lazy" /></a>
-                : <video key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}</div>}
+              {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment =>
+                <ActivityMediaItem key={attachment.key} attachment={attachment} onRefresh={() => refreshActivityAttachment(post.id, attachment.key)} />)}</div>}
             </article>)}
           </div>
           <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>＋</button>
@@ -1627,13 +1708,10 @@ export default function App() {
           {activityFiles.length > 0 && <div className="activity-file-list">{activityFiles.map(file => {
             const key = attachmentKey(file);
             const progress = activityUploadProgress[key];
-            return <div className="activity-file" key={key}>
-              <span>{file.name}</span>
-              {postingActivity && <progress max="100" value={progress || 0} aria-label={`Uploading ${file.name}`} />}
-              {!postingActivity && <button aria-label={`Remove ${file.name}`} onClick={() => setActivityFiles(current => current.filter(item => attachmentKey(item) !== key))}>×</button>}
-            </div>;
+            return <ActivityFilePreview key={key} file={file} progress={postingActivity ? progress || 0 : undefined} disabled={postingActivity} onRemove={() => setActivityFiles(current => current.filter(item => attachmentKey(item) !== key))} />;
           })}</div>}
           {activityError && <p className="err">{activityError}</p>}
+          {!publicConfig.mediaEnabled && <p className="activity-storage-note">Photo and video posts are paused until durable media storage is configured. Your text posts still work.</p>}
           <div className="activity-composer-actions">
             <input ref={activityInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onChange={event => { selectActivityFiles(event.target.files); event.target.value = ''; }} />
             <button className="btn ghost" disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onClick={() => activityInputRef.current?.click()}>Add photos/videos</button>

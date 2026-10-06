@@ -14,12 +14,12 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const {
-  MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000,
+  MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000, NODE_ENV = 'development',
   CORS_ORIGIN = '*', SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE = 'false', SMTP_USER,
   SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
   TURN_KEY_ID, TURN_API_TOKEN, TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OWNER_EMAIL = '', OTP_DEV_MODE = 'false',
-  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, UPLOADS_DIR,
+  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, UPLOADS_DIR, UPLOADS_PERSISTENT = 'false',
   VAPID_PUBLIC_KEY: ENV_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY: ENV_VAPID_PRIVATE_KEY,
   VAPID_SUBJECT = 'mailto:admin@nepachat.pages.dev',
 } = process.env;
@@ -47,6 +47,7 @@ await deviceSessions.createIndex({ userId: 1, revokedAt: 1 });
 await devicePairings.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
 app.use(express.json({ limit: '50kb' }));
 const server = http.createServer(app);
@@ -54,7 +55,7 @@ const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : COR
 const localUploadsDir = path.resolve(UPLOADS_DIR || path.join(process.cwd(), 'uploads'));
 await fs.mkdir(localUploadsDir, { recursive: true });
 const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
-const mediaEnabled = true;
+const mediaEnabled = r2Configured || UPLOADS_PERSISTENT === 'true' || NODE_ENV !== 'production';
 const r2 = r2Configured ? new S3Client({
   region: 'auto',
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -999,6 +1000,7 @@ const removeStoredMedia = async key => {
 };
 
 app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
+  if (!mediaEnabled) return res.status(503).json({ error: 'Photo and video storage is unavailable until durable media storage is configured.' });
   const chat = await member(req.params.id, req.uid);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
   let fileName;
@@ -1018,6 +1020,7 @@ app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaL
 }));
 
 app.put('/api/activity/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
+  if (!mediaEnabled) return res.status(503).json({ error: 'Photo and video storage is unavailable until durable media storage is configured.' });
   let fileName;
   try {
     fileName = decodeURIComponent(String(req.get('x-file-name') || 'activity')).replace(/[\r\n\\/]/g, '').slice(0, 120);
@@ -1035,6 +1038,7 @@ app.put('/api/activity/uploads', auth, express.raw({ type: '*/*', limit: mediaLi
 
 const avatarLimit = 5 * 1024 * 1024;
 app.put('/api/me/avatar', auth, express.raw({ type: '*/*', limit: avatarLimit }), wrap(async (req, res) => {
+  if (!mediaEnabled) return res.status(503).json({ error: 'Profile pictures are unavailable until durable media storage is configured.' });
   let fileName;
   try {
     fileName = decodeURIComponent(String(req.get('x-file-name') || 'profile')).replace(/[\r\n\\/]/g, '').slice(0, 120);
@@ -1085,6 +1089,7 @@ app.get('/api/activity/posts', auth, wrap(async (req, res) => {
 app.post('/api/activity/posts', auth, wrap(async (req, res) => {
   const text = String(req.body.text || '').trim().slice(0, 2000);
   const requested = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+  if (requested.length && !mediaEnabled) return res.status(503).json({ error: 'Photo and video storage is unavailable until durable media storage is configured.' });
   if ((!text && !requested.length) || requested.length > 5) return res.status(400).json({ error: 'Add a caption or at least one photo/video (up to 5 files)' });
   const attachments = [];
   for (const item of requested) {
