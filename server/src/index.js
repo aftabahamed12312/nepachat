@@ -9,7 +9,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import webpush from 'web-push';
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 
@@ -25,7 +25,7 @@ const {
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -39,6 +39,9 @@ await locationShares.createIndex({ chatId: 1, ownerId: 1 });
 await pushSubs.createIndex({ endpoint: 1 }, { unique: true });
 await pushSubs.createIndex({ userId: 1 });
 await activityPosts.createIndex({ createdAt: -1, _id: -1 });
+await friendships.createIndex({ pairKey: 1 }, { unique: true });
+await friendships.createIndex({ fromId: 1, status: 1 });
+await friendships.createIndex({ toId: 1, status: 1 });
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
@@ -93,7 +96,10 @@ async function sendGmailOtp(to, code) {
   if (!response.ok) throw new Error(`Gmail API send failed with status ${response.status}`);
 }
 
-const pub = u => ({ id: String(u._id), username: u.username, email: u.email });
+const pub = u => ({
+  id: String(u._id), username: u.username, email: u.email,
+  avatarPath: u.avatarKey ? `/api/users/${u._id}/avatar?v=${encodeURIComponent(path.basename(u.avatarKey))}` : null,
+});
 const accountView = u => ({ ...pub(u), role: u.role || 'user' });
 const sign = u => jwt.sign({ id: String(u._id) }, JWT_SECRET, { expiresIn: '30d' });
 const oid = s => { try { return new ObjectId(s); } catch { return null; } };
@@ -315,6 +321,49 @@ app.get('/api/me', auth, wrap(async (req, res) => {
   u ? res.json(accountView(u)) : res.status(401).json({ error: 'Unknown user' });
 }));
 
+app.patch('/api/me/profile', auth, wrap(async (req, res) => {
+  const username = String(req.body.username || '').trim().toLowerCase().replace(/^@/, '');
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const newPassword = String(req.body.newPassword || '');
+  const current = await users.findOne({ _id: oid(req.uid) });
+  if (!current) return res.status(404).json({ error: 'Account not found' });
+  if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 letters, numbers, or underscores' });
+  if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
+  if (newPassword && newPassword.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  if (newPassword) {
+    const currentPassword = String(req.body.currentPassword || '');
+    if (!currentPassword || !await bcrypt.compare(currentPassword, current.hash)) return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  if ((username !== current.username || email !== current.email) && await users.findOne({
+    _id: { $ne: current._id },
+    $or: [{ username }, { email }],
+  })) return res.status(409).json({ error: 'Username or email is already in use' });
+  const changes = { username, email };
+  if (newPassword) changes.hash = await bcrypt.hash(newPassword, 10);
+  try {
+    await users.updateOne({ _id: current._id }, { $set: changes });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: 'Username or email is already in use' });
+    throw error;
+  }
+  const updated = { ...current, ...changes };
+  res.json(accountView(updated));
+}));
+
+app.get('/api/users/:id/avatar', wrap(async (req, res) => {
+  const id = oid(req.params.id);
+  if (!id) return res.status(404).end();
+  const user = await users.findOne({ _id: id }, { projection: { avatarKey: 1 } });
+  if (!user?.avatarKey || !new RegExp(`^profile/${id}/[a-f0-9-]{36}\\.(?:jpg|png|webp|gif)$`).test(user.avatarKey)) return res.status(404).end();
+  if (r2Configured) {
+    const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: user.avatarKey }), { expiresIn: 3600 });
+    return res.redirect(302, url);
+  }
+  const file = path.resolve(localUploadsDir, user.avatarKey);
+  if (!file.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(404).end();
+  res.sendFile(file);
+}));
+
 app.get('/api/calls/history', auth, wrap(async (req, res) => {
   const list = await calls.find({ participants: req.uid }).sort({ startedAt: -1 }).limit(100).toArray();
   const history = await Promise.all(list.map(async item => {
@@ -377,6 +426,99 @@ app.get('/api/users/search', auth, wrap(async (req, res) => {
   const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const list = await users.find({ _id: { $ne: oid(req.uid) }, $or: [{ username: { $regex: '^' + esc } }, { email: q }] }).limit(10).toArray();
   res.json(list.map(pub));
+}));
+
+async function friendStateFor(userId) {
+  const links = await friendships.find({ $or: [{ fromId: userId }, { toId: userId }] }).sort({ createdAt: -1 }).toArray();
+  const friends = [], incoming = [], outgoing = [];
+  await Promise.all(links.map(async link => {
+    const otherId = link.fromId === userId ? link.toId : link.fromId;
+    const user = await users.findOne({ _id: oid(otherId) });
+    if (!user) return;
+    const person = pub(user);
+    if (link.status === 'accepted') friends.push(person);
+    else if (link.toId === userId) incoming.push({ id: String(link._id), user: person, createdAt: link.createdAt });
+    else outgoing.push({ id: String(link._id), user: person, createdAt: link.createdAt });
+  }));
+  return { friends, incoming, outgoing };
+}
+
+app.get('/api/friends', auth, wrap(async (req, res) => {
+  res.json(await friendStateFor(req.uid));
+}));
+
+app.post('/api/friends/requests', auth, wrap(async (req, res) => {
+  const query = String(req.body.to || '').trim().toLowerCase().replace(/^@/, '');
+  if (!query) return res.status(400).json({ error: 'Enter a username or email address' });
+  const target = await users.findOne(query.includes('@') ? { email: query } : { username: query });
+  if (!target) return res.status(404).json({ error: 'No NepaChat user found' });
+  const targetId = String(target._id);
+  if (targetId === req.uid) return res.status(400).json({ error: 'You cannot send a friend request to yourself' });
+  const pairKey = [req.uid, targetId].sort().join('~');
+  const existing = await friendships.findOne({ pairKey });
+  if (existing?.status === 'accepted') return res.status(409).json({ error: 'You are already friends' });
+  if (existing?.status === 'pending') {
+    return res.status(409).json({ error: existing.fromId === req.uid ? 'Friend request already sent' : 'This user already sent you a request. Accept it from your requests.' });
+  }
+  const request = { pairKey, fromId: req.uid, toId: targetId, status: 'pending', createdAt: Date.now() };
+  let result;
+  try {
+    result = await friendships.insertOne(request);
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    return res.status(409).json({ error: 'A friend request already exists for this user' });
+  }
+  const requester = await users.findOne({ _id: oid(req.uid) });
+  io.to('u:' + targetId).emit('friend:request', {
+    id: String(result.insertedId),
+    username: requester?.username || 'Someone',
+  });
+  io.to('u:' + targetId).emit('friend:changed');
+  io.to('u:' + req.uid).emit('friend:changed');
+  await notifyUser(targetId, {
+    title: 'New friend request',
+    body: `${requester?.username || 'Someone'} wants to connect`,
+    tag: `friend-request-${String(result.insertedId)}`,
+    url: '/?notifications=friends',
+  });
+  res.status(201).json({ id: String(result.insertedId), user: pub(target), createdAt: request.createdAt });
+}));
+
+app.patch('/api/friends/requests/:id', auth, wrap(async (req, res) => {
+  const id = oid(req.params.id);
+  const action = String(req.body.action || '');
+  if (!id || !['accept', 'reject'].includes(action)) return res.status(400).json({ error: 'Choose whether to accept or reject this request' });
+  const request = await friendships.findOne({ _id: id, toId: req.uid, status: 'pending' });
+  if (!request) return res.status(404).json({ error: 'Friend request not found' });
+  if (action === 'accept') {
+    await friendships.updateOne({ _id: id, toId: req.uid, status: 'pending' }, { $set: { status: 'accepted', acceptedAt: Date.now() } });
+    const acceptingUser = await users.findOne({ _id: oid(req.uid) });
+    const acceptedBy = acceptingUser ? pub(acceptingUser) : { id: req.uid, username: 'Someone', email: '' };
+    io.to('u:' + request.fromId).emit('friend:accepted', acceptedBy);
+    if (acceptingUser) {
+      await notifyUser(request.fromId, {
+        title: 'Friend request accepted',
+        body: `${acceptingUser.username} accepted your request`,
+        tag: `friend-accepted-${String(id)}`,
+        url: '/?notifications=friends',
+      });
+    }
+  } else {
+    await friendships.deleteOne({ _id: id, toId: req.uid, status: 'pending' });
+  }
+  io.to(['u:' + request.fromId, 'u:' + request.toId]).emit('friend:changed');
+  res.json({ ok: true });
+}));
+
+app.delete('/api/friends/:friendId', auth, wrap(async (req, res) => {
+  const friendId = oid(req.params.friendId);
+  if (!friendId) return res.status(400).json({ error: 'Invalid friend' });
+  const otherId = String(friendId);
+  const pairKey = [req.uid, otherId].sort().join('~');
+  const result = await friendships.deleteOne({ pairKey, status: 'accepted' });
+  if (!result.deletedCount) return res.status(404).json({ error: 'Friend not found' });
+  io.to(['u:' + req.uid, 'u:' + otherId]).emit('friend:changed');
+  res.json({ ok: true });
 }));
 
 app.get('/api/chats', auth, wrap(async (req, res) => {
@@ -456,6 +598,16 @@ const storeMedia = async (prefix, body, type) => {
   }
   return key;
 };
+const removeStoredMedia = async key => {
+  if (!key) return;
+  if (r2Configured) {
+    await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+    return;
+  }
+  const file = path.resolve(localUploadsDir, key);
+  if (!file.startsWith(`${localUploadsDir}${path.sep}`)) throw new Error('Refusing to remove media outside the upload directory');
+  await fs.rm(file, { force: true });
+};
 
 app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
@@ -492,6 +644,28 @@ app.put('/api/activity/uploads', auth, express.raw({ type: '*/*', limit: mediaLi
   res.status(201).json({ attachment: { key, type, name: fileName || 'activity', size: req.body.length } });
 }));
 
+const avatarLimit = 5 * 1024 * 1024;
+app.put('/api/me/avatar', auth, express.raw({ type: '*/*', limit: avatarLimit }), wrap(async (req, res) => {
+  let fileName;
+  try {
+    fileName = decodeURIComponent(String(req.get('x-file-name') || 'profile')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  } catch {
+    return res.status(400).json({ error: 'Invalid file name' });
+  }
+  const declaredType = String(req.get('x-file-type') || req.get('content-type') || '').split(';')[0].toLowerCase();
+  const type = mediaTypes.has(declaredType) ? declaredType : mediaTypeFromName(fileName) || declaredType;
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(type) ||
+    !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > avatarLimit || !fileMatchesMediaType(req.body, type)) {
+    return res.status(400).json({ error: 'Choose a valid JPEG, PNG, WebP, or GIF image under 5 MB' });
+  }
+  const user = await users.findOne({ _id: oid(req.uid) });
+  if (!user) return res.status(404).json({ error: 'Account not found' });
+  const avatarKey = await storeMedia(`profile/${req.uid}`, req.body, type);
+  await users.updateOne({ _id: user._id }, { $set: { avatarKey } });
+  if (user.avatarKey) await removeStoredMedia(user.avatarKey).catch(error => console.error('Unable to remove previous profile picture:', error));
+  res.json(accountView({ ...user, avatarKey }));
+}));
+
 async function activityPostView(post, req) {
   const author = await users.findOne({ _id: oid(post.authorId) });
   const attachments = await Promise.all((post.attachments || []).map(async attachment => ({
@@ -510,7 +684,12 @@ async function activityPostView(post, req) {
 }
 
 app.get('/api/activity/posts', auth, wrap(async (req, res) => {
-  const list = await activityPosts.find().sort({ createdAt: -1, _id: -1 }).limit(50).toArray();
+  const accepted = await friendships.find({
+    status: 'accepted',
+    $or: [{ fromId: req.uid }, { toId: req.uid }],
+  }, { projection: { fromId: 1, toId: 1 } }).toArray();
+  const visibleAuthors = [req.uid, ...accepted.map(link => link.fromId === req.uid ? link.toId : link.fromId)];
+  const list = await activityPosts.find({ authorId: { $in: visibleAuthors } }).sort({ createdAt: -1, _id: -1 }).limit(50).toArray();
   res.json(await Promise.all(list.map(post => activityPostView(post, req))));
 }));
 
@@ -541,7 +720,18 @@ app.post('/api/activity/posts', auth, wrap(async (req, res) => {
   const post = { authorId: req.uid, text, attachments, createdAt: Date.now() };
   const result = await activityPosts.insertOne(post);
   const view = await activityPostView({ ...post, _id: result.insertedId }, req);
-  io.emit('activity:post', view);
+  const accepted = await friendships.find({
+    status: 'accepted',
+    $or: [{ fromId: req.uid }, { toId: req.uid }],
+  }, { projection: { fromId: 1, toId: 1 } }).toArray();
+  const recipients = [req.uid, ...accepted.map(link => link.fromId === req.uid ? link.toId : link.fromId)];
+  io.to(recipients.map(userId => 'u:' + userId)).emit('activity:post', view);
+  await Promise.all(recipients.filter(userId => userId !== req.uid).map(userId => notifyUser(userId, {
+    title: `New activity from ${view.author.username}`,
+    body: text || (attachments.length ? 'Shared a photo or video' : 'Shared a post'),
+    tag: `activity-${String(result.insertedId)}`,
+    url: '/?notifications=activity',
+  })));
   res.status(201).json(view);
 }));
 

@@ -23,6 +23,7 @@ const isSupportedAttachment = file => {
 const call = async (path, token, method = 'GET', body) => {
   const r = await fetch(API + '/api' + path, {
     method,
+    cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
     body: body && JSON.stringify(body),
   });
@@ -31,7 +32,12 @@ const call = async (path, token, method = 'GET', body) => {
   return d;
 };
 const time = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-const Avatar = ({ name, big }) => <div className={'avatar' + (big ? ' big' : '')}>{(name || '?')[0].toUpperCase()}</div>;
+const Avatar = ({ name, big, avatarPath }) => (
+  <div className={'avatar' + (big ? ' big' : '')}>
+    {avatarPath && <img src={API + avatarPath} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
+    <span>{(name || '?')[0].toUpperCase()}</span>
+  </div>
+);
 const decodeVapidKey = value => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0));
 
 function Auth({ onAuth, allowPublicSignUp }) {
@@ -160,7 +166,7 @@ function NewChat({ token, onClose, onOpen, me }) {
         <h3>New chat</h3>
         <input autoFocus value={q} onChange={e => { setQ(e.target.value); setMsg(null); }} placeholder="Email address or @username" onKeyDown={e => e.key === 'Enter' && q.trim() && start(q.trim())} />
         <div className="hits">
-          {hits.map(u => <button key={u.id} className="row" onClick={() => start(u.username)}><Avatar name={u.username} /><div><b>@{u.username}</b><small>{u.email}</small></div></button>)}
+          {hits.map(u => <button key={u.id} className="row" onClick={() => start(u.username)}><Avatar name={u.username} avatarPath={u.avatarPath} /><div><b>{u.username}</b><small>{u.email}</small></div></button>)}
           {q.trim().length > 1 && !hits.length && <p className="muted">No match yet. Press Enter to try exactly “{q.trim()}”.</p>}
           {msg?.text && <p className="err">{msg.text}</p>}
           {(msg?.email || (isMail && !hits.length)) && (
@@ -258,8 +264,8 @@ function AdminUsers({ token, onClose }) {
           <div className="admin-user-list">
             {!loading && !error && users.map(user => (
               <button key={user.id} className="row admin-user-row" onClick={() => setSelected(user)}>
-                <Avatar name={user.username} />
-                <div className="grow"><b>@{user.username}</b><small>{user.email}</small></div>
+                <Avatar name={user.username} avatarPath={user.avatarPath} />
+                <div className="grow"><b>{user.username}</b><small>{user.email}</small></div>
                 <span className="admin-user-role">{user.role}</span>
               </button>
             ))}
@@ -277,6 +283,91 @@ function AdminUsers({ token, onClose }) {
   );
 }
 
+function ProfileSettings({ me, token, onClose, onUpdated }) {
+  const [username, setUsername] = useState(me.username);
+  const [email, setEmail] = useState(me.email);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [picture, setPicture] = useState(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState('');
+  const selectPicture = event => {
+    const file = event.target.files?.[0] || null;
+    setError('');
+    setNotice('');
+    if (file && (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type) || file.size > 5 * 1024 * 1024)) {
+      setError('Choose a JPEG, PNG, WebP, or GIF image under 5 MB.');
+      event.target.value = '';
+      return;
+    }
+    setPicture(file);
+    setPreview(file ? URL.createObjectURL(file) : '');
+  };
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+  const save = async event => {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      let updated = await call('/me/profile', token, 'PATCH', { username, email, currentPassword, newPassword });
+      onUpdated(updated);
+      if (picture) {
+        const response = await fetch(`${API}/api/me/avatar`, {
+          method: 'PUT',
+          headers: {
+            Authorization: 'Bearer ' + token,
+            'Content-Type': picture.type,
+            'X-File-Type': picture.type,
+            'X-File-Name': encodeURIComponent(picture.name),
+          },
+          body: picture,
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || `Profile picture upload failed (${response.status})`);
+        updated = result;
+        onUpdated(updated);
+        setPicture(null);
+        setPreview('');
+      }
+      setCurrentPassword('');
+      setNewPassword('');
+      setNotice('Profile updated.');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="modal" onClick={() => { if (!saving) onClose(); }}>
+      <form className="sheet profile-sheet" onClick={event => event.stopPropagation()} onSubmit={save}>
+        <div className="profile-heading"><h3>Profile settings</h3><button type="button" aria-label="Close profile settings" disabled={saving} onClick={onClose}>×</button></div>
+        <div className="profile-picture-setting">
+          <div className="avatar profile-avatar">
+            {(preview || me.avatarPath) && <img src={preview || (API + me.avatarPath)} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
+            <span>{(username || '?')[0].toUpperCase()}</span>
+          </div>
+          <label className="profile-picture-label">Profile picture
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={selectPicture} disabled={saving} />
+            <small>JPEG, PNG, WebP, or GIF; up to 5 MB</small>
+          </label>
+        </div>
+        <label>Username<input value={username} onChange={event => setUsername(event.target.value)} minLength={3} maxLength={20} required disabled={saving} /></label>
+        <label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required disabled={saving} /></label>
+        <p className="muted profile-password-note">Leave password fields empty to keep your current password.</p>
+        <label>Current password<input type="password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} autoComplete="current-password" disabled={saving} /></label>
+        <label>New password<input type="password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={8} autoComplete="new-password" disabled={saving} /></label>
+        {error && <p className="err">{error}</p>}
+        {notice && <p className="notice">{notice}</p>}
+        <button className="btn" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
+      </form>
+    </div>
+  );
+}
+
 function CallHistory({ token, onClose }) {
   const [history, setHistory] = useState([]), [error, setError] = useState('');
   useEffect(() => { call('/calls/history', token).then(setHistory).catch(requestError => setError(requestError.message)); }, [token]);
@@ -289,8 +380,8 @@ function CallHistory({ token, onClose }) {
         {!history.length && !error && <p className="muted">No calls yet.</p>}
         <div className="history-list">{history.map(item => (
           <div className="history-row" key={item.id}>
-            <Avatar name={item.other.username} />
-            <div className="grow"><b>@{item.other.username}</b><small>{item.direction === 'incoming' ? 'Incoming' : 'Outgoing'} {item.kind} · {label(item)}</small></div>
+            <Avatar name={item.other.username} avatarPath={item.other.avatarPath} />
+            <div className="grow"><b>{item.other.username}</b><small>{item.direction === 'incoming' ? 'Incoming' : 'Outgoing'} {item.kind} · {label(item)}</small></div>
             <time>{new Date(item.startedAt).toLocaleString()}</time>
           </div>
         ))}</div>
@@ -326,13 +417,19 @@ function LocationShareDialog({ onStart, onClose }) {
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, mediaEnabled: false });
-  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false);
+  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
   const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
   const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
   const [activityUploadProgress, setActivityUploadProgress] = useState({});
   const [activityComposerOpen, setActivityComposerOpen] = useState(false);
+  const [friendData, setFriendData] = useState({ friends: [], incoming: [], outgoing: [] });
+  const [friendPanel, setFriendPanel] = useState('');
+  const [friendQuery, setFriendQuery] = useState('');
+  const [friendSearchResults, setFriendSearchResults] = useState([]);
+  const [friendError, setFriendError] = useState('');
+  const [friendActionId, setFriendActionId] = useState('');
   const [text, setText] = useState(''), [replyingTo, setReplyingTo] = useState(null), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]), [composeError, setComposeError] = useState('');
   const [uploadState, setUploadState] = useState({});
@@ -343,8 +440,9 @@ export default function App() {
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   activeRef.current = active;
+  activeViewRef.current = activeView;
   callRef.current = callState;
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
@@ -355,11 +453,25 @@ export default function App() {
   };
   const logout = () => { stopLocationTracking(); localStorage.removeItem('nepa'); setAuth(null); setChats([]); setActive(null); setLocationShares([]); };
   const onAuth = d => { localStorage.setItem('nepa', JSON.stringify(d)); setAuth(d); };
+  const onProfileUpdated = user => setAuth(current => {
+    if (!current) return current;
+    const updated = { ...current, user };
+    localStorage.setItem('nepa', JSON.stringify(updated));
+    return updated;
+  });
+  const refreshFriendData = () => call('/friends', token).then(setFriendData);
 
   useEffect(() => {
     call('/config').then(config => {
       setPublicConfig(config);
       if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
+      const notificationTarget = new URLSearchParams(window.location.search).get('notifications');
+      if (notificationTarget === 'friends') {
+        setActiveView('activity');
+        setFriendPanel('requests');
+      } else if (notificationTarget === 'activity') {
+        setActiveView('activity');
+      }
       if (config.vapidPublicKey && 'serviceWorker' in navigator && Notification.permission === 'granted') {
         navigator.serviceWorker.ready.then(registration => registration.pushManager.getSubscription().then(subscription => setPushEnabled(Boolean(subscription)))).catch(() => {});
       }
@@ -372,24 +484,30 @@ export default function App() {
   };
   const showSystemNotification = (title, options = {}) => {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const notification = new Notification(title, {
-      body: options.body || '',
-      icon: options.icon || '/icon.svg',
-      tag: options.tag || undefined,
-      requireInteraction: Boolean(options.requireInteraction),
-    });
-    if (options.onClick) {
-      notification.onclick = () => {
-        window.focus();
-        options.onClick();
-        notification.close();
-      };
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.ready.then(registration => registration.showNotification(title, {
+        body: options.body || '',
+        icon: options.icon || '/icon.svg',
+        badge: options.icon || '/icon.svg',
+        tag: options.tag || undefined,
+        requireInteraction: Boolean(options.requireInteraction),
+        data: { url: options.url || '/', focusOnly: Boolean(options.onClick) },
+      })).catch(error => console.error('Unable to show device notification:', error));
+      return;
     }
+    const notification = new Notification(title, { body: options.body || '', tag: options.tag || undefined });
+    notification.onclick = () => {
+      window.focus();
+      if (options.onClick) options.onClick();
+      else window.location.assign(options.url || '/');
+      notification.close();
+    };
   };
   const enableNotifications = async () => {
     setPushError('');
     try {
-      if (!publicConfig.vapidPublicKey) throw new Error('Call notifications are not configured yet');
+      if (!('Notification' in window)) throw new Error('Notifications are not supported in this browser');
+      if (!publicConfig.vapidPublicKey) throw new Error('Device notifications are not configured on the server yet');
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('Push notifications are not supported in this browser');
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') throw new Error('Allow notifications in your browser to receive call alerts');
@@ -397,7 +515,7 @@ export default function App() {
       const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeVapidKey(publicConfig.vapidPublicKey) });
       await call('/push/subscribe', token, 'POST', { subscription: subscription.toJSON() });
       setPushEnabled(true);
-      addAlert('Call notifications enabled', 'success');
+      addAlert('Device notifications enabled', 'success');
     } catch (error) {
       setPushError(error.message);
       addAlert(error.message, 'error');
@@ -544,21 +662,75 @@ export default function App() {
 
   useEffect(() => {
     if (!token) return;
+    let lastVisibleRefresh = 0;
+    const refreshVisibleData = () => {
+      if (Date.now() - lastVisibleRefresh < 1000) return;
+      lastVisibleRefresh = Date.now();
+      call('/chats', token).then(setChats).catch(error => {
+        if (error.status === 401) logout();
+        else console.error('Unable to refresh chats:', error);
+      });
+      const currentChat = activeRef.current;
+      if (currentChat) {
+        call(`/chats/${currentChat.id}/messages`, token).then(list => {
+          if (activeRef.current?.id !== currentChat.id) return;
+          setMessages(list);
+          for (const message of list) {
+            if (message.from === me.id) continue;
+            socketRef.current?.emit('message:delivered', { chatId: currentChat.id, messageId: message.id });
+            socketRef.current?.emit('message:read', { chatId: currentChat.id, messageId: message.id });
+          }
+        }).catch(error => console.error('Unable to refresh messages:', error));
+        call(`/chats/${currentChat.id}/location-shares`, token).then(shares => {
+          if (activeRef.current?.id !== currentChat.id) return;
+          setLocationShares(current => [
+            ...current.filter(item => item.chatId !== currentChat.id),
+            ...shares,
+          ]);
+        }).catch(error => console.error('Unable to refresh location shares:', error));
+      }
+      if (activeViewRef.current === 'activity') {
+        call('/activity/posts', token).then(posts => {
+          if (activeViewRef.current === 'activity') setActivityPosts(posts);
+        }).catch(error => console.error('Unable to refresh activity:', error));
+        refreshFriendData().catch(error => console.error('Unable to refresh friend requests:', error));
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshVisibleData();
+    };
     call('/me', token).then(user => setAuth(current => {
       if (!current || current.user.role === user.role) return current;
       const updated = { ...current, user };
       localStorage.setItem('nepa', JSON.stringify(updated));
       return updated;
     })).catch(e => e.status === 401 && logout());
-    call('/chats', token).then(setChats).catch(e => e.status === 401 && logout());
+    call('/chats', token).then(list => {
+      setChats(list);
+      const chatId = new URLSearchParams(window.location.search).get('chat');
+      const targetChat = chatId && list.find(item => item.id === chatId);
+      if (targetChat) {
+        setActiveView('chats');
+        setActive(targetChat);
+        history.replaceState(null, '', window.location.pathname);
+      }
+    }).catch(e => e.status === 401 && logout());
+    window.addEventListener('focus', refreshVisibleData);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
     const s = io(API || undefined, { auth: { token } });
     socketRef.current = s;
+    s.io.on('reconnect', refreshVisibleData);
     s.on('message', ({ chatId, message, chat }) => {
       setChats(c => [chat, ...c.filter(x => x.id !== chatId)]);
       if (message.from !== me.id) {
         s.emit('message:delivered', { chatId, messageId: message.id });
         if (activeRef.current?.id === chatId) s.emit('message:read', { chatId, messageId: message.id });
         addAlert(`New message from @${chat.other.username}`, 'info');
+        showSystemNotification(`New message from ${chat.other.username}`, {
+          body: message.text || (message.attachments?.length ? 'Shared a photo or video' : 'Sent you a message'),
+          tag: `message-${message.id}`,
+          url: `/?chat=${encodeURIComponent(chatId)}`,
+        });
       }
       if (activeRef.current?.id === chatId) setMessages(m => m.some(x => x.id === message.id) ? m : [...m, message]);
     });
@@ -569,6 +741,37 @@ export default function App() {
     });
     s.on('location:update', share => setLocationShares(current => [...current.filter(item => item.id !== share.id), share]));
     s.on('activity:post', post => setActivityPosts(current => [post, ...current.filter(item => item.id !== post.id)].slice(0, 50)));
+    s.on('activity:post', post => {
+      if (post.author.id !== me.id) {
+        showSystemNotification(`New activity from ${post.author.username}`, {
+          body: post.text || (post.attachments?.length ? 'Shared a photo or video' : 'Shared a post'),
+          tag: `activity-${post.id}`,
+          url: '/?notifications=activity',
+        });
+      }
+    });
+    s.on('friend:request', request => {
+      refreshFriendData().catch(error => console.error('Unable to refresh friend requests:', error));
+      showSystemNotification('New friend request', {
+        body: `${request.username} wants to connect`,
+        tag: `friend-request-${request.id}`,
+        url: '/?notifications=friends',
+      });
+    });
+    s.on('friend:accepted', friend => {
+      refreshFriendData().catch(error => console.error('Unable to refresh friend data:', error));
+      showSystemNotification('Friend request accepted', {
+        body: `${friend.username} accepted your request`,
+        tag: `friend-accepted-${friend.id}`,
+        url: '/?notifications=friends',
+      });
+    });
+    s.on('friend:changed', () => {
+      refreshFriendData().catch(error => console.error('Unable to refresh friend requests:', error));
+      if (activeViewRef.current === 'activity') {
+        call('/activity/posts', token).then(setActivityPosts).catch(error => console.error('Unable to refresh activity after friend update:', error));
+      }
+    });
     s.on('location:stopped', ({ shareId }) => setLocationShares(current => current.filter(item => item.id !== shareId)));
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
@@ -601,7 +804,12 @@ export default function App() {
       }
     });
     s.on('call:ended', ({ callId }) => { if (callRef.current?.callId === callId) clearCall(); });
-    return () => { s.close(); socketRef.current = null; clearCall(); };
+    return () => {
+      window.removeEventListener('focus', refreshVisibleData);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      s.io.off('reconnect', refreshVisibleData);
+      s.close(); socketRef.current = null; clearCall();
+    };
   }, [token]);
 
   useEffect(() => {
@@ -609,12 +817,26 @@ export default function App() {
     let current = true;
     setActivityLoading(true);
     setActivityError('');
-    call('/activity/posts', token)
-      .then(posts => { if (current) setActivityPosts(posts); })
+    Promise.all([call('/activity/posts', token), refreshFriendData()])
+      .then(([posts]) => { if (current) setActivityPosts(posts); })
       .catch(error => { if (current) setActivityError(error.message); })
       .finally(() => { if (current) setActivityLoading(false); });
     return () => { current = false; };
   }, [activeView, token]);
+
+  useEffect(() => {
+    if (activeView !== 'activity' || friendPanel !== 'discover' || friendQuery.trim().length < 2) {
+      setFriendSearchResults([]);
+      return;
+    }
+    let current = true;
+    const timeout = window.setTimeout(() => {
+      call('/users/search?q=' + encodeURIComponent(friendQuery.trim()), token)
+        .then(results => { if (current) setFriendSearchResults(results); })
+        .catch(error => { if (current) setFriendError(error.message); });
+    }, 200);
+    return () => { current = false; window.clearTimeout(timeout); };
+  }, [activeView, friendPanel, friendQuery, token]);
 
   useEffect(() => {
     if (!active) return;
@@ -636,6 +858,35 @@ export default function App() {
     setActiveView(view);
     setActive(null);
     setIsDraggingFiles(false);
+  };
+  const sendFriendRequest = async user => {
+    setFriendError('');
+    setFriendActionId(user.id);
+    try {
+      await call('/friends/requests', token, 'POST', { to: user.username });
+      await refreshFriendData();
+    } catch (error) {
+      setFriendError(error.message);
+      if (error.status === 409) refreshFriendData().catch(refreshError => setFriendError(refreshError.message));
+    } finally {
+      setFriendActionId('');
+    }
+  };
+  const respondToFriendRequest = async (request, action) => {
+    setFriendError('');
+    setFriendActionId(request.id);
+    try {
+      await call(`/friends/requests/${request.id}`, token, 'PATCH', { action });
+      await refreshFriendData();
+      if (action === 'accept') {
+        const posts = await call('/activity/posts', token);
+        setActivityPosts(posts);
+      }
+    } catch (error) {
+      setFriendError(error.message);
+    } finally {
+      setFriendActionId('');
+    }
   };
   const selectActivityFiles = fileList => {
     const incoming = Array.from(fileList || []);
@@ -775,10 +1026,14 @@ export default function App() {
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
         <small>@{me.username}</small>
+        <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}>⚙</button>
         {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
         <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
-        {publicConfig.vapidPublicKey && <button className={'hbtn' + (pushEnabled ? ' push-on' : '')} title={pushEnabled ? 'Call notifications enabled' : 'Enable call notifications'} aria-label="Enable call notifications" onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>}
+        <button className={'hbtn' + (pushEnabled ? ' push-on' : '')}
+          title={pushEnabled ? 'Device notifications enabled' : publicConfig.vapidPublicKey ? 'Enable device notifications' : 'Device notifications are not configured'}
+          aria-label={pushEnabled ? 'Device notifications enabled' : 'Enable device notifications'}
+          onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>
         <button className="hbtn" title="New chat" onClick={() => setModal(true)}>＋</button>
         <button className="hbtn" title="Sign out" onClick={logout}>⎋</button>
       </header>
@@ -793,8 +1048,8 @@ export default function App() {
             {!shown.length && <p className="muted pad">No chats yet. Tap ＋ to start one.</p>}
             {shown.map(c => (
               <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => { setActiveView('chats'); setActive(c); }}>
-                <Avatar name={c.other.username} />
-                <div className="grow"><b>@{c.other.username}</b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
+                <Avatar name={c.other.username} avatarPath={c.other.avatarPath} />
+                <div className="grow"><b>{c.other.username}</b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
                 {c.ts > 0 && <em>{time(c.ts)}</em>}
               </button>))}
           </div>
@@ -807,15 +1062,77 @@ export default function App() {
         onDrop={handleFileDrop}>
         {isDraggingFiles && <div className="drop-overlay" aria-hidden="true">{activeView === 'activity' ? 'Drop photos/videos to add to your post' : 'Drop images or videos to attach'}</div>}
         {activeView === 'activity' ? <div className="activity-page">
-          <div className="activity-heading"><button className="activity-back" onClick={() => selectView('chats')}>← Chats</button><h2>Activity</h2><p>Share photos, videos, and updates with everyone on NepaChat.</p></div>
+          <div className="activity-heading">
+            <button className="activity-back" onClick={() => selectView('chats')}>← Chats</button>
+            <h2>Activity</h2>
+            <p>Share updates with your accepted friends.</p>
+            <div className="friend-tabs">
+              <button className={friendPanel === 'discover' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'discover' ? '' : 'discover'); setFriendError(''); }}>Find people</button>
+              <button className={friendPanel === 'requests' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'requests' ? '' : 'requests'); setFriendError(''); }}>
+                Requests{friendData.incoming.length > 0 && <span>{friendData.incoming.length}</span>}
+              </button>
+              <button className={friendPanel === 'friends' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'friends' ? '' : 'friends'); setFriendError(''); }}>
+                Friends{friendData.friends.length > 0 && <span>{friendData.friends.length}</span>}
+              </button>
+            </div>
+          </div>
+          {friendPanel && <section className="friend-panel">
+            <div className="friend-panel-heading">
+              <h3>{friendPanel === 'discover' ? 'Find people' : friendPanel === 'requests' ? 'Friend requests' : 'Your friends'}</h3>
+              <button aria-label="Close friends panel" onClick={() => { setFriendPanel(''); setFriendError(''); }}>×</button>
+            </div>
+            {friendError && <p className="err">{friendError}</p>}
+            {friendPanel === 'discover' && <>
+              <input className="friend-search" value={friendQuery} onChange={event => { setFriendQuery(event.target.value); setFriendError(''); }} placeholder="Search by username or email" />
+              {friendQuery.trim().length < 2 && <p className="muted">Enter at least 2 characters to find someone.</p>}
+              {friendSearchResults.map(user => {
+                const isFriend = friendData.friends.some(friend => friend.id === user.id);
+                const incoming = friendData.incoming.find(request => request.user.id === user.id);
+                const outgoing = friendData.outgoing.some(request => request.user.id === user.id);
+                return <div className="friend-row" key={user.id}>
+                  <Avatar name={user.username} />
+                  <div className="grow"><b>@{user.username}</b><small>{user.email}</small></div>
+                  {isFriend ? <span className="friend-status">Friends</span>
+                    : incoming ? <button className="btn" disabled={friendActionId === incoming.id} onClick={() => respondToFriendRequest(incoming, 'accept')}>Accept request</button>
+                      : outgoing ? <span className="friend-status">Request sent</span>
+                        : <button className="btn" disabled={friendActionId === user.id} onClick={() => sendFriendRequest(user)}>{friendActionId === user.id ? 'Sending…' : 'Add friend'}</button>}
+                </div>;
+              })}
+            </>}
+            {friendPanel === 'requests' && <>
+              <h4>Received</h4>
+              {!friendData.incoming.length && <p className="muted">No pending requests.</p>}
+              {friendData.incoming.map(request => <div className="friend-row" key={request.id}>
+                <Avatar name={request.user.username} avatarPath={request.user.avatarPath} />
+                <div className="grow"><b>{request.user.username}</b><small>{request.user.email}</small></div>
+                <button className="btn" disabled={friendActionId === request.id} onClick={() => respondToFriendRequest(request, 'accept')}>Accept</button>
+                <button className="friend-decline" disabled={friendActionId === request.id} onClick={() => respondToFriendRequest(request, 'reject')}>Reject</button>
+              </div>)}
+              <h4>Sent</h4>
+              {!friendData.outgoing.length && <p className="muted">No sent requests.</p>}
+              {friendData.outgoing.map(request => <div className="friend-row" key={request.id}>
+                <Avatar name={request.user.username} avatarPath={request.user.avatarPath} />
+                <div className="grow"><b>{request.user.username}</b><small>{request.user.email}</small></div>
+                <span className="friend-status">Waiting for approval</span>
+              </div>)}
+            </>}
+            {friendPanel === 'friends' && <>
+              {!friendData.friends.length && <p className="muted">No friends yet. Find people and send a request.</p>}
+              {friendData.friends.map(friend => <div className="friend-row" key={friend.id}>
+                <Avatar name={friend.username} avatarPath={friend.avatarPath} />
+                <div className="grow"><b>{friend.username}</b><small>{friend.email}</small></div>
+                <span className="friend-status">Friends</span>
+              </div>)}
+            </>}
+          </section>}
           <button className="activity-start-post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>
-            <Avatar name={me.username} /><span>What's happening, @{me.username}?</span><b>＋</b>
+            <Avatar name={me.username} avatarPath={me.avatarPath} /><span>What's happening, {me.username}?</span><b>＋</b>
           </button>
           <div className="activity-feed" aria-live="polite">
             {activityLoading && !activityPosts.length && <p className="muted">Loading activity…</p>}
             {!activityLoading && !activityError && !activityPosts.length && <div className="empty activity-empty"><div>✦</div><h3>No activity yet</h3><p>Share your first update with the community.</p></div>}
             {activityPosts.map(post => <article className="activity-post" key={post.id}>
-              <header><Avatar name={post.author.username} /><div><b>@{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
+              <header><Avatar name={post.author.username} avatarPath={post.author.avatarPath} /><div><b>{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
               {post.text && <p className="activity-post-text">{post.text}</p>}
               {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment => attachment.type.startsWith('image/')
                 ? <a href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img src={attachment.url} alt={attachment.name} loading="lazy" /></a>
@@ -826,8 +1143,8 @@ export default function App() {
         </div> : !active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
           <div className="chead">
             <button className="back" onClick={() => setActive(null)}>←</button>
-            <Avatar name={active.other.username} big />
-            <div className="grow"><b>@{active.other.username}</b><small>{active.other.email}</small></div>
+            <Avatar name={active.other.username} avatarPath={active.other.avatarPath} big />
+            <div className="grow"><b>{active.other.username}</b><small>{active.other.email}</small></div>
             <button className="mail" title="Share live location" aria-label="Share live location" onClick={() => setLocationModal(true)}>⌖</button>
             <button className="mail" title="Start audio call" aria-label="Start audio call" onClick={() => startCall('audio')}>☎</button>
             <button className="mail" title="Start video call" aria-label="Start video call" onClick={() => startCall('video')}>▣</button>
@@ -878,10 +1195,11 @@ export default function App() {
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
       {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
+      {profileOpen && <ProfileSettings me={me} token={token} onClose={() => setProfileOpen(false)} onUpdated={onProfileUpdated} />}
       {activityComposerOpen && <div className="modal activity-compose-modal" onClick={() => { if (!postingActivity) setActivityComposerOpen(false); }}>
         <section className="sheet activity-compose-sheet" onClick={event => event.stopPropagation()}>
           <div className="activity-compose-title"><h3>Create post</h3><button aria-label="Close post composer" disabled={postingActivity} onClick={() => setActivityComposerOpen(false)}>×</button></div>
-          <div className="activity-composer-head"><Avatar name={me.username} /><b>@{me.username}</b></div>
+          <div className="activity-composer-head"><Avatar name={me.username} avatarPath={me.avatarPath} /><b>{me.username}</b></div>
           <textarea maxLength={2000} value={activityText} onChange={event => setActivityText(event.target.value)} placeholder="What's happening today?" aria-label="Write an activity post" />
           {activityFiles.length > 0 && <div className="activity-file-list">{activityFiles.map(file => {
             const key = attachmentKey(file);
