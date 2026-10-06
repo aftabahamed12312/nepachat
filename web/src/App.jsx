@@ -39,17 +39,86 @@ const Avatar = ({ name, big, avatarPath }) => (
   </div>
 );
 const decodeVapidKey = value => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), character => character.charCodeAt(0));
+const getDeviceId = () => {
+  const key = 'nepachat-device-id';
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+};
+const getDeviceName = () => {
+  const agent = navigator.userAgent || '';
+  const platform = /iPhone|iPad|iPod/i.test(agent) ? 'iPhone/iPad'
+    : /Android/i.test(agent) ? 'Android'
+      : /Windows/i.test(agent) ? 'Windows'
+        : /Macintosh|Mac OS/i.test(agent) ? 'Mac'
+          : /Linux/i.test(agent) ? 'Linux' : 'Web browser';
+  return `${platform} browser`;
+};
 
 function Auth({ onAuth, allowPublicSignUp }) {
+  const onAuthRef = useRef(onAuth);
+  onAuthRef.current = onAuth;
   const [mode, setMode] = useState('login');
   const [f, setF] = useState({ username: '', email: '', password: '' });
   const [err, setErr] = useState(''), [notice, setNotice] = useState(''), [awaitingCode, setAwaitingCode] = useState(false), [code, setCode] = useState('');
+  const [pairing, setPairing] = useState(null), [pairingQr, setPairingQr] = useState(''), [pairingError, setPairingError] = useState('');
   const set = k => e => setF({ ...f, [k]: e.target.value });
+  useEffect(() => {
+    if (!pairing) return undefined;
+    let cancelled = false, checking = false;
+    let timer;
+    import('qrcode').then(({ default: QRCode }) =>
+      QRCode.toDataURL(JSON.stringify({ type: 'nepachat-device-link', requestId: pairing.requestId, secret: pairing.secret, deviceName: pairing.deviceName }), { margin: 2, width: 260 }),
+    ).then(source => { if (!cancelled) setPairingQr(source); })
+      .catch(error => { if (!cancelled) setPairingError(`Could not create a QR code: ${error.message}`); });
+    const checkStatus = async () => {
+      if (cancelled || checking) return;
+      checking = true;
+      try {
+        const result = await call(`/devices/pairing/${pairing.requestId}/claim`, null, 'POST', { secret: pairing.secret });
+        if (result.status === 'approved') {
+          if (!cancelled) onAuthRef.current(result);
+          return;
+        }
+      } catch (error) {
+        if (!cancelled) setPairingError(error.message);
+        if (error.status === 410) return;
+      } finally {
+        checking = false;
+      }
+      if (!cancelled) timer = window.setTimeout(checkStatus, 2000);
+    };
+    timer = window.setTimeout(checkStatus, 2000);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [pairing]);
+  const startPairing = async () => {
+    setPairingError('');
+    setPairingQr('');
+    try {
+      const request = await call('/devices/pairing', null, 'POST', { deviceId: getDeviceId(), deviceName: getDeviceName() });
+      setPairing(request);
+    } catch (error) {
+      setPairingError(error.message);
+    }
+  };
+  const authenticateDevice = async (path, credentials) => {
+    const device = { deviceId: getDeviceId(), deviceName: getDeviceName() };
+    try {
+      return await call(path, null, 'POST', { ...credentials, ...device });
+    } catch (error) {
+      if (!error.data?.deviceIdConflict) throw error;
+      localStorage.removeItem('nepachat-device-id');
+      return call(path, null, 'POST', { ...credentials, deviceId: getDeviceId(), deviceName: getDeviceName() });
+    }
+  };
   const go = async e => {
     e.preventDefault(); setErr(''); setNotice('');
     try {
-      if (mode === 'login') onAuth(await call('/login', null, 'POST', { email: f.email, password: f.password }));
-      else if (awaitingCode) onAuth(await call('/verify-email', null, 'POST', { email: f.email, code }));
+      if (mode === 'login') onAuth(await authenticateDevice('/login', { email: f.email, password: f.password }));
+      else if (awaitingCode) onAuth(await authenticateDevice('/verify-email', { email: f.email, code }));
       else {
         const d = await call('/register', null, 'POST', f);
         setAwaitingCode(true); setNotice(d.message); setCode('');
@@ -62,6 +131,19 @@ function Auth({ onAuth, allowPublicSignUp }) {
     try { const d = await call('/register', null, 'POST', f); setNotice(d.message); }
     catch (x) { setErr(x.message); }
   };
+  if (pairing) return (
+    <div className="auth">
+      <header className="top"><b>Nepa<span>Chat</span></b></header>
+      <section className="card pairing-card">
+        <h2>Link this device</h2>
+        <p>On a device already signed in to NepaChat, open <b>Linked devices</b> and scan this code.</p>
+        {pairingQr ? <img className="pairing-qr" src={pairingQr} alt="QR code to link this device" /> : <p className="muted">Preparing secure QR code…</p>}
+        <p className="muted">This code expires in five minutes. Keep it private.</p>
+        {pairingError && <div className="err">{pairingError}</div>}
+        <button className="btn ghost" onClick={() => { setPairing(null); setPairingQr(''); setPairingError(''); }}>Cancel</button>
+      </section>
+    </div>
+  );
   return (
     <div className="auth">
       <header className="top"><b>Nepa<span>Chat</span></b></header>
@@ -79,18 +161,175 @@ function Auth({ onAuth, allowPublicSignUp }) {
         {allowPublicSignUp
           ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
           : <p className="sw">Account creation is managed by the owner.</p>}
+        {mode === 'login' && <button type="button" className="text-button" onClick={startPairing}>Link a companion device</button>}
       </form>
     </div>
   );
 }
 
-function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChange, onAccept, onDecline, onHangup }) {
+function LinkedDevices({ token, onClose, onAlert }) {
+  const [devices, setDevices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+  const [scanRequest, setScanRequest] = useState(null);
+  const [error, setError] = useState('');
+  const videoRef = useRef(null);
+  const controlsRef = useRef(null);
+  const handledScanRef = useRef(false);
+  const refresh = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setDevices(await call('/devices', token));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { refresh(); }, [token]);
+  useEffect(() => {
+    if (!scanning) return undefined;
+    let cancelled = false;
+    handledScanRef.current = false;
+    import('@zxing/browser').then(({ BrowserMultiFormatReader }) => {
+      if (cancelled) return undefined;
+      const reader = new BrowserMultiFormatReader();
+      return reader.decodeFromVideoDevice(undefined, videoRef.current, async result => {
+        if (!result || cancelled || handledScanRef.current) return;
+        handledScanRef.current = true;
+        controlsRef.current?.stop();
+        setScanning(false);
+        try {
+          const parsed = JSON.parse(result.getText());
+          if (parsed.type !== 'nepachat-device-link' || typeof parsed.requestId !== 'string' || typeof parsed.secret !== 'string') {
+            throw new Error('That QR code is not a NepaChat device link.');
+          }
+          setScanRequest(parsed);
+        } catch (requestError) {
+          setError(requestError.message || 'Could not link this device');
+        }
+      });
+    }).then(controls => {
+      if (!controls) return;
+      controlsRef.current = controls;
+      if (cancelled) controls.stop();
+    }).catch(requestError => {
+      if (!cancelled) {
+        setScanning(false);
+        setError(requestError.message || 'Could not open the camera. Allow camera access and try again.');
+      }
+    });
+    return () => {
+      cancelled = true;
+      controlsRef.current?.stop();
+      controlsRef.current = null;
+    };
+  }, [scanning, token]);
+  const revokeDevice = async device => {
+    setError('');
+    try {
+      await call(`/devices/${device.id}`, token, 'DELETE');
+      setDevices(current => current.filter(item => item.id !== device.id));
+      onAlert(`${device.name} was unlinked`, 'success');
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  };
+  const approveScannedDevice = async () => {
+    if (!scanRequest) return;
+    setError('');
+    try {
+      await call(`/devices/pairings/${scanRequest.requestId}/approve`, token, 'POST', { secret: scanRequest.secret });
+      setScanRequest(null);
+      await refresh();
+      onAlert('Device linked successfully', 'success');
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  };
+  return (
+    <div className="modal linked-devices-modal" onClick={onClose}>
+      <section className="sheet linked-devices-sheet" role="dialog" aria-modal="true" aria-labelledby="linked-devices-title" onClick={event => event.stopPropagation()}>
+        <div className="linked-devices-heading">
+          <h3 id="linked-devices-title">Linked devices</h3>
+          <button aria-label="Close linked devices" onClick={onClose}>×</button>
+        </div>
+        <p className="muted">Use NepaChat on up to four companion devices. Scan a device's QR code here to approve it.</p>
+        {error && <p className="err">{error}</p>}
+        {scanRequest ? <>
+          <p>Approve linking <b>{scanRequest.deviceName || 'this device'}</b> to your account?</p>
+          <button className="btn" onClick={approveScannedDevice}>Approve device link</button>
+          <button className="btn ghost" onClick={() => setScanRequest(null)}>Cancel</button>
+        </> : scanning ? <>
+          <video ref={videoRef} className="device-scanner-video" muted playsInline />
+          <button className="btn ghost" onClick={() => setScanning(false)}>Cancel scan</button>
+        </> : <button className="btn" onClick={() => { setError(''); setScanning(true); }}>Scan QR code to link a device</button>}
+        <h4>Your devices</h4>
+        {loading && <p className="muted">Loading devices…</p>}
+        {!loading && !devices.length && <p className="muted">No active devices found.</p>}
+        <div className="linked-device-list">{devices.map(device => (
+          <div className="linked-device-row" key={device.id}>
+            <div className="linked-device-icon">▣</div>
+            <div className="grow"><b>{device.name}{device.current ? ' (this device)' : ''}</b><small>{device.isPrimary ? 'Primary device' : 'Companion device'} · Last active {new Date(device.lastSeenAt).toLocaleString()}</small></div>
+            {!device.current && <button className="friend-decline" onClick={() => revokeDevice(device)}>Unlink</button>}
+          </div>
+        ))}</div>
+        <button className="btn ghost" onClick={onClose}>Done</button>
+      </section>
+    </div>
+  );
+}
+
+function CallPanel({ callState, localStream, remoteStream, peerConnection, audioEnabled, videoEnabled, layout, onLayoutChange, onToggleAudio, onToggleVideo, onSwitchCamera, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
   const panelRef = useRef();
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [networkQuality, setNetworkQuality] = useState('Connecting');
   const dragRef = useRef(null);
   useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
   useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
+  useEffect(() => {
+    if (!peerConnection) {
+      setNetworkQuality('Connecting');
+      return undefined;
+    }
+    let current = true;
+    const previousInbound = new Map();
+    const measure = async () => {
+      try {
+        const stats = await peerConnection.getStats();
+        let roundTripTime = null, outgoingBitrate = null, packetsReceived = 0, packetsLost = 0;
+        stats.forEach(report => {
+          if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.nominated || report.selected)) {
+            roundTripTime = report.currentRoundTripTime ?? roundTripTime;
+            outgoingBitrate = report.availableOutgoingBitrate ?? outgoingBitrate;
+          }
+          if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.kind === 'video')) {
+            const prior = previousInbound.get(report.id);
+            if (prior) {
+              packetsReceived += Math.max(0, (report.packetsReceived || 0) - prior.received);
+              packetsLost += Math.max(0, (report.packetsLost || 0) - prior.lost);
+            }
+            previousInbound.set(report.id, { received: report.packetsReceived || 0, lost: report.packetsLost || 0 });
+          }
+        });
+        const totalPackets = packetsReceived + packetsLost;
+        const lossRate = totalPackets ? packetsLost / totalPackets : 0;
+        const poor = (roundTripTime !== null && roundTripTime > 0.5) || lossRate > 0.08 || (outgoingBitrate !== null && outgoingBitrate < 200_000);
+        const fair = (roundTripTime !== null && roundTripTime > 0.25) || lossRate > 0.03 || (outgoingBitrate !== null && outgoingBitrate < 700_000);
+        if (current) setNetworkQuality(peerConnection.connectionState === 'connected' ? poor ? 'Poor' : fair ? 'Fair' : 'Good' : 'Connecting');
+      } catch (error) {
+        if (current) {
+          console.error('Unable to read call network statistics:', error);
+          setNetworkQuality('Unavailable');
+        }
+      }
+    };
+    measure();
+    const timer = window.setInterval(measure, 2500);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [peerConnection]);
   useEffect(() => {
     const onPointerMove = event => {
       if (!dragRef.current) return;
@@ -112,7 +351,11 @@ function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChang
     };
   }, []);
   if (!callState) return null;
-  const label = callState.incoming ? `Incoming ${callState.kind} call` : callState.status === 'calling' ? 'Calling…' : callState.status === 'active' ? 'Connected' : 'Connecting…';
+  const label = callState.incoming ? `Incoming ${callState.kind} call`
+    : callState.status === 'calling' ? 'Calling…'
+      : callState.status === 'active' ? 'Connected'
+        : callState.status === 'reconnecting' ? 'Reconnecting…'
+          : callState.status === 'failed' ? 'Connection failed' : 'Connecting…';
   const handleDragStart = event => {
     if (event.button !== 0 || event.target.closest('button')) return;
     event.preventDefault();
@@ -145,16 +388,26 @@ function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChang
         <div className={'call-stage' + (callState.kind === 'audio' ? ' audio-stage' : '')}>
           <video ref={remoteRef} autoPlay playsInline className="remote-video" />
           {callState.kind === 'audio' && <div className="audio-label">{callState.peerName}</div>}
-          {callState.kind === 'video' && localStream && <video ref={localRef} autoPlay muted playsInline className="local-video" />}
+          {callState.kind === 'video' && localStream && videoEnabled && <video ref={localRef} autoPlay muted playsInline className="local-video" />}
+          {callState.kind === 'video' && !videoEnabled && <div className="video-paused-label">Camera off</div>}
         </div>
         <footer>
           {layout === 'minimized' ? <>
             <span className="call-mini-status">{label}</span>
+            {!callState.incoming && <button className={'call-control' + (audioEnabled ? '' : ' disabled')} title={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} aria-label={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} onClick={onToggleAudio}>{audioEnabled ? 'Mic on' : 'Mic off'}</button>}
             {callState.incoming ? <button className="btn" onClick={onAccept}>Answer</button> : <button className="btn danger" onClick={onHangup}>End</button>}
           </> : callState.incoming ? <>
             <button className="btn" onClick={onAccept}>Answer</button>
             <button className="btn danger" onClick={onDecline}>Decline</button>
-          </> : <button className="btn danger" onClick={onHangup}>End call</button>}
+          </> : <>
+            <span className={'call-network-quality quality-' + networkQuality.toLowerCase()} role="status">Network: {networkQuality}</span>
+            <button className={'call-control' + (audioEnabled ? '' : ' disabled')} title={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} aria-label={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} onClick={onToggleAudio}>{audioEnabled ? 'Mic on' : 'Mic off'}</button>
+            {callState.kind === 'video' && <>
+              <button className={'call-control' + (videoEnabled ? '' : ' disabled')} title={videoEnabled ? 'Turn camera off' : 'Turn camera on'} aria-label={videoEnabled ? 'Turn camera off' : 'Turn camera on'} onClick={onToggleVideo}>{videoEnabled ? 'Camera on' : 'Camera off'}</button>
+              <button className="call-control" title="Switch camera" aria-label="Switch camera" onClick={onSwitchCamera}>Flip camera</button>
+            </>}
+            <button className="btn danger" onClick={onHangup}>End call</button>
+          </>}
         </footer>
       </section>
     </div>
@@ -220,14 +473,16 @@ function AdminCreateUser({ token, onClose }) {
   );
 }
 
-function AdminUsers({ token, onClose }) {
+function AdminUsers({ token, currentUserId, onClose }) {
   const [query, setQuery] = useState('');
   const [users, setUsers] = useState([]);
   const [selected, setSelected] = useState(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   useEffect(() => {
     let current = true;
     const timeout = window.setTimeout(() => {
@@ -251,6 +506,27 @@ function AdminUsers({ token, onClose }) {
     } catch (requestError) { setError(requestError.message); }
     finally { setLoadingMore(false); }
   };
+  const deleteSelected = async () => {
+    if (!selected || deleting) return;
+    const confirmed = window.confirm(
+      `Permanently delete @${selected.username} and their account data? This removes their chats, messages, and attachments for everyone in those chats, friendships, activity posts, calls, location shares, devices, and profile. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await call(`/admin/users/${encodeURIComponent(selected.id)}`, token, 'DELETE');
+      setUsers(current => current.filter(user => user.id !== selected.id));
+      setTotal(current => Math.max(0, current - 1));
+      setSelected(null);
+      if (result.mediaCleanupWarning) setNotice(`Account deleted. ${result.mediaCleanupWarning}.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
   const created = selected?.created ? new Date(selected.created).toLocaleString() : 'Not available';
   return (
     <div className="modal" onClick={onClose}>
@@ -263,16 +539,25 @@ function AdminUsers({ token, onClose }) {
           <div className="admin-user-profile">
             <Avatar name={selected.username} />
             <h4>@{selected.username}</h4>
+            {error && <p className="err">{error}</p>}
             <dl>
               <div><dt>Email</dt><dd>{selected.email}</dd></div>
               <div><dt>Account type</dt><dd>{selected.role}</dd></div>
               <div><dt>Email verified</dt><dd>{selected.verified ? 'Yes' : 'No'}</dd></div>
               <div><dt>Account created</dt><dd>{created}</dd></div>
             </dl>
+            {selected.id === currentUserId ? (
+              <p className="muted">You cannot delete the account you are currently using.</p>
+            ) : (
+              <button className="btn danger" onClick={deleteSelected} disabled={deleting}>
+                {deleting ? 'Deleting account…' : 'Permanently delete account'}
+              </button>
+            )}
           </div>
         ) : <>
           <input className="search admin-user-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by username or email" />
           {error && <p className="err">{error}</p>}
+          {notice && <p className="notice">{notice}</p>}
           <div className="admin-user-list">
             {!loading && !error && users.map(user => (
               <button key={user.id} className="row admin-user-row" onClick={() => setSelected(user)}>
@@ -429,7 +714,7 @@ function LocationShareDialog({ onStart, onClose }) {
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
-  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false);
+  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
   const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
@@ -447,15 +732,20 @@ export default function App() {
   const [uploadState, setUploadState] = useState({});
   const [isSending, setIsSending] = useState(false);
   const [locationShares, setLocationShares] = useState([]), [locationError, setLocationError] = useState('');
-  const [pushEnabled, setPushEnabled] = useState(false), [pushError, setPushError] = useState('');
+  const [pushError, setPushError] = useState('');
+  const [notificationPromptOpen, setNotificationPromptOpen] = useState(false), [configLoaded, setConfigLoaded] = useState(false);
   const [alerts, setAlerts] = useState([]);
-  const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
+  const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null), [peerConnection, setPeerConnection] = useState(null);
+  const [audioEnabled, setAudioEnabled] = useState(true), [videoEnabled, setVideoEnabled] = useState(true);
+  const [cameraFacing, setCameraFacing] = useState('user');
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const backStateRef = useRef(null);
   activeRef.current = active;
   activeViewRef.current = activeView;
   callRef.current = callState;
+  backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
   const stopLocationTracking = () => {
@@ -474,6 +764,22 @@ export default function App() {
   const refreshFriendData = () => call('/friends', token).then(setFriendData);
 
   useEffect(() => {
+    if (!token || !me?.id) return;
+    call('/devices/current', token, 'POST', { deviceId: getDeviceId(), deviceName: getDeviceName() })
+      .then(session => {
+        if (session.token) onAuth(session);
+      })
+      .catch(error => {
+        if (error.status === 401) {
+          localStorage.removeItem('nepa');
+          setAuth(null);
+        } else {
+          console.error('Unable to register this device session:', error);
+        }
+      });
+  }, [token]);
+
+  useEffect(() => {
     call('/config').then(config => {
       setPublicConfig(config);
       if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
@@ -484,11 +790,53 @@ export default function App() {
       } else if (notificationTarget === 'activity') {
         setActiveView('activity');
       }
-      if (config.vapidPublicKey && 'serviceWorker' in navigator && Notification.permission === 'granted') {
-        navigator.serviceWorker.ready.then(registration => registration.pushManager.getSubscription().then(subscription => setPushEnabled(Boolean(subscription)))).catch(() => {});
-      }
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setConfigLoaded(true));
   }, []);
+  useEffect(() => {
+    if (!auth?.user?.id || !configLoaded || !publicConfig.pushNotificationsEnabled || !publicConfig.vapidPublicKey) return;
+    const promptKey = `nepachat-notifications-asked:${auth.user.id}`;
+    if (localStorage.getItem(promptKey)) return;
+    if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window) || Notification.permission === 'denied') {
+      localStorage.setItem(promptKey, '1');
+      return;
+    }
+    if (Notification.permission === 'granted') {
+      navigator.serviceWorker.ready.then(registration => registration.pushManager.getSubscription()).then(subscription => {
+        if (subscription) {
+          localStorage.setItem(promptKey, '1');
+        } else {
+          setNotificationPromptOpen(true);
+        }
+      }).catch(error => console.error('Unable to check device notification subscription:', error));
+      return;
+    }
+    setNotificationPromptOpen(true);
+  }, [auth?.user?.id, configLoaded, publicConfig.pushNotificationsEnabled, publicConfig.vapidPublicKey]);
+  useEffect(() => {
+    if (!auth) return;
+    const pushBackGuard = () => {
+      window.history.pushState({ nepachatBackGuard: true }, '', window.location.href);
+    };
+    if (!window.history.state?.nepachatBackGuard) pushBackGuard();
+    const handleBackNavigation = () => {
+      const state = backStateRef.current;
+      if (state?.activityComposerOpen) setActivityComposerOpen(false);
+      else if (state?.notificationPromptOpen) dismissNotificationPrompt();
+      else if (state?.locationModal) setLocationModal(false);
+      else if (state?.profileOpen) setProfileOpen(false);
+      else if (state?.adminUsersOpen) setAdminUsersOpen(false);
+      else if (state?.adminModal) setAdminModal(false);
+      else if (state?.callsOpen) setCallsOpen(false);
+      else if (state?.linkedDevicesOpen) setLinkedDevicesOpen(false);
+      else if (state?.modal) setModal(false);
+      else if (state?.friendPanel) setFriendPanel('');
+      else if (state?.active) setActive(null);
+      else if (state?.activeView === 'activity') setActiveView('chats');
+      pushBackGuard();
+    };
+    window.addEventListener('popstate', handleBackNavigation);
+    return () => window.removeEventListener('popstate', handleBackNavigation);
+  }, [Boolean(auth)]);
   const addAlert = (message, kind = 'info') => {
     const next = { id: `${Date.now()}-${Math.random()}`, message, kind };
     setAlerts(current => [...current, next]);
@@ -526,12 +874,17 @@ export default function App() {
       const registration = await navigator.serviceWorker.ready;
       const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeVapidKey(publicConfig.vapidPublicKey) });
       await call('/push/subscribe', token, 'POST', { subscription: subscription.toJSON() });
-      setPushEnabled(true);
+      localStorage.setItem(`nepachat-notifications-asked:${me.id}`, '1');
+      setNotificationPromptOpen(false);
       addAlert('Device notifications enabled', 'success');
     } catch (error) {
       setPushError(error.message);
       addAlert(error.message, 'error');
     }
+  };
+  const dismissNotificationPrompt = () => {
+    if (me?.id) localStorage.setItem(`nepachat-notifications-asked:${me.id}`, '1');
+    setNotificationPromptOpen(false);
   };
   const startLocationShare = async durationSeconds => {
     if (!active || !navigator.geolocation) throw new Error('Location is not available in this browser');
@@ -604,9 +957,6 @@ export default function App() {
       request.send(file);
     });
   };
-  const enablePush = async () => {
-    await enableNotifications();
-  };
   const showCallHistory = () => {
     setCallsOpen(true);
     if (new URLSearchParams(window.location.search).has('callHistory')) history.replaceState(null, '', window.location.pathname);
@@ -614,7 +964,7 @@ export default function App() {
   const clearCall = () => {
     peerRef.current?.close(); peerRef.current = null;
     localStreamRef.current?.getTracks().forEach(track => track.stop()); localStreamRef.current = null;
-    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setCallState(null); setCallLayout('overlay'); callRef.current = null;
+    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setPeerConnection(null); setCallState(null); setCallLayout('overlay'); setAudioEnabled(true); setVideoEnabled(true); setCameraFacing('user'); callRef.current = null;
   };
   const endCall = reason => {
     const current = callRef.current;
@@ -624,6 +974,7 @@ export default function App() {
 
   const attachPeer = (peer, current) => {
     peerRef.current = peer;
+    setPeerConnection(peer);
     peer.ontrack = event => setRemoteStream(event.streams[0]);
     peer.onicecandidate = event => {
       if (event.candidate) socketRef.current?.emit('call:signal', { chatId: current.chatId, callId: current.callId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
@@ -632,13 +983,73 @@ export default function App() {
       if (peer.connectionState === 'connected') setCallState(c => c ? { ...c, status: 'active' } : c);
       if (peer.connectionState === 'failed') setCallState(c => c ? { ...c, error: 'Connection failed. Check your network or TURN server settings.' } : c);
     };
+    peer.oniceconnectionstatechange = () => {
+      if (peer.iceConnectionState === 'disconnected') setCallState(c => c ? { ...c, status: 'reconnecting' } : c);
+      if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') setCallState(c => c ? { ...c, status: 'active' } : c);
+      if (peer.iceConnectionState === 'failed') setCallState(c => c ? { ...c, status: 'failed', error: 'Could not connect. Check your network or TURN server settings, then try calling again.' } : c);
+    };
+  };
+
+  const toggleAudio = () => {
+    const tracks = localStreamRef.current?.getAudioTracks() || [];
+    if (!tracks.length) {
+      setCallState(current => current ? { ...current, error: 'Microphone track is unavailable. End the call and try again.' } : current);
+      return;
+    }
+    const enabled = !tracks.some(track => track.enabled);
+    tracks.forEach(track => { track.enabled = enabled; });
+    setAudioEnabled(enabled);
+  };
+
+  const toggleVideo = () => {
+    const tracks = localStreamRef.current?.getVideoTracks() || [];
+    if (!tracks.length) {
+      setCallState(current => current ? { ...current, error: 'Camera track is unavailable. End the call and try again.' } : current);
+      return;
+    }
+    const enabled = !tracks.some(track => track.enabled);
+    tracks.forEach(track => { track.enabled = enabled; });
+    setVideoEnabled(enabled);
+  };
+
+  const switchCamera = async () => {
+    const current = callRef.current;
+    const stream = localStreamRef.current;
+    if (!current || current.kind !== 'video' || !stream) return;
+    let replacement;
+    try {
+      replacement = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { exact: cameraFacing === 'user' ? 'environment' : 'user' } },
+      });
+      const nextTrack = replacement.getVideoTracks()[0];
+      const oldTrack = stream.getVideoTracks()[0];
+      const sender = peerRef.current?.getSenders().find(item => item.track?.kind === 'video');
+      if (!nextTrack || !sender || !oldTrack) throw new Error('The other camera could not be selected.');
+      nextTrack.enabled = videoEnabled;
+      await sender.replaceTrack(nextTrack);
+      const nextStream = new MediaStream([...stream.getAudioTracks(), nextTrack]);
+      localStreamRef.current = nextStream;
+      oldTrack.stop();
+      setLocalStream(nextStream);
+      setCameraFacing(cameraFacing === 'user' ? 'environment' : 'user');
+      setCallState(value => value ? { ...value, error: '' } : value);
+    } catch (error) {
+      replacement?.getTracks().forEach(track => track.stop());
+      setCallState(value => value ? {
+        ...value,
+        error: error.name === 'NotAllowedError'
+          ? 'Allow camera access to switch cameras.'
+          : error.message || 'Unable to switch camera on this device.',
+      } : value);
+    }
   };
 
   const startCall = async kind => {
     if (!active || !socketRef.current || callRef.current) return;
     try {
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false });
       const current = { chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id, peerName: '@' + active.other.username, kind, status: 'calling' };
       const peer = new RTCPeerConnection({ iceServers });
       callRef.current = current; setCallState(current); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
@@ -656,7 +1067,7 @@ export default function App() {
     if (!current?.incoming) return;
     try {
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: current.kind === 'video' });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false });
       const peer = new RTCPeerConnection({ iceServers });
       const connecting = { ...current, incoming: false, status: 'connecting' };
       callRef.current = connecting; setCallState(connecting); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
@@ -784,6 +1195,12 @@ export default function App() {
         call('/activity/posts', token).then(setActivityPosts).catch(error => console.error('Unable to refresh activity after friend update:', error));
       }
     });
+    s.on('account:changed', () => {
+      call('/chats', token).then(setChats).catch(error => console.error('Unable to refresh chats after account deletion:', error));
+      refreshFriendData().catch(error => console.error('Unable to refresh friends after account deletion:', error));
+      call('/activity/posts', token).then(setActivityPosts).catch(error => console.error('Unable to refresh activity after account deletion:', error));
+    });
+    s.on('account:deleted', logout);
     s.on('location:stopped', ({ shareId }) => setLocationShares(current => current.filter(item => item.id !== shareId)));
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
@@ -797,6 +1214,9 @@ export default function App() {
         requireInteraction: true,
         onClick: () => setCallLayout('overlay'),
       });
+    });
+    s.on('call:answered-elsewhere', ({ callId }) => {
+      if (callRef.current?.callId === callId && callRef.current.incoming) clearCall();
     });
     s.on('call:signal', async ({ callId, signal }) => {
       if (signal.type === 'candidate' && !callRef.current) {
@@ -1042,10 +1462,7 @@ export default function App() {
         {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
         <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
-        <button className={'hbtn' + (pushEnabled ? ' push-on' : '')}
-          title={pushEnabled ? 'Device notifications enabled' : publicConfig.pushNotificationsEnabled ? 'Enable device notifications' : 'Device notifications need API server setup'}
-          aria-label={pushEnabled ? 'Device notifications enabled' : 'Enable device notifications'}
-          onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>
+        <button className="hbtn" title="Linked devices" aria-label="Linked devices" onClick={() => setLinkedDevicesOpen(true)}>▣</button>
         <button className="hbtn" title="New chat" onClick={() => setModal(true)}>＋</button>
         <button className="hbtn" title="Sign out" onClick={logout}>⎋</button>
       </header>
@@ -1202,8 +1619,18 @@ export default function App() {
           </div>
         </>}
       </main>
+      {notificationPromptOpen && <div className="modal notification-prompt-modal">
+        <section className="sheet notification-prompt-sheet" role="dialog" aria-modal="true" aria-labelledby="notification-prompt-title">
+          <h3 id="notification-prompt-title">Stay up to date</h3>
+          <p>Enable device notifications to hear about new messages, calls, friend requests, and activity when NepaChat isn’t open.</p>
+          {pushError && <p className="err">{pushError}</p>}
+          <button className="btn" onClick={enableNotifications}>Enable notifications</button>
+          <button className="btn ghost" onClick={dismissNotificationPrompt}>Not now</button>
+        </section>
+      </div>}
       {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
-      {adminUsersOpen && <AdminUsers token={token} onClose={() => setAdminUsersOpen(false)} />}
+      {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} onAlert={addAlert} />}
+      {adminUsersOpen && <AdminUsers token={token} currentUserId={me.id} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
       {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
@@ -1232,13 +1659,13 @@ export default function App() {
           </div>
         </section>
       </div>}
-      {pushError && <div className="push-error" role="status">{pushError}<button aria-label="Dismiss" onClick={() => setPushError('')}>×</button></div>}
+      {pushError && !notificationPromptOpen && <div className="push-error" role="status">{pushError}<button aria-label="Dismiss" onClick={() => setPushError('')}>×</button></div>}
       {alerts.length > 0 && (
         <div className="alert-stack" aria-live="polite" aria-atomic="true">
           {alerts.map(alert => <div key={alert.id} className={'alert-item alert-' + alert.kind}>{alert.message}</div>)}
         </div>
       )}
-      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} layout={callLayout} onLayoutChange={setCallLayout} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
+      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} peerConnection={peerConnection} audioEnabled={audioEnabled} videoEnabled={videoEnabled} layout={callLayout} onLayoutChange={setCallLayout} onToggleAudio={toggleAudio} onToggleVideo={toggleVideo} onSwitchCamera={switchCamera} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );
 }

@@ -9,9 +9,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import webpush from 'web-push';
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const {
   MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000,
@@ -26,7 +26,7 @@ const {
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -43,6 +43,8 @@ await activityPosts.createIndex({ createdAt: -1, _id: -1 });
 await friendships.createIndex({ pairKey: 1 }, { unique: true });
 await friendships.createIndex({ fromId: 1, status: 1 });
 await friendships.createIndex({ toId: 1, status: 1 });
+await deviceSessions.createIndex({ userId: 1, revokedAt: 1 });
+await devicePairings.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
@@ -126,7 +128,7 @@ const pub = u => ({
   avatarPath: u.avatarKey ? `/api/users/${u._id}/avatar?v=${encodeURIComponent(path.basename(u.avatarKey))}` : null,
 });
 const accountView = u => ({ ...pub(u), role: u.role || 'user' });
-const sign = u => jwt.sign({ id: String(u._id) }, JWT_SECRET, { expiresIn: '30d' });
+const sign = (u, deviceId) => jwt.sign({ id: String(u._id), did: deviceId }, JWT_SECRET, { expiresIn: '30d' });
 const oid = s => { try { return new ObjectId(s); } catch { return null; } };
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -150,9 +152,85 @@ if (OWNER_EMAIL) {
   if (!result.matchedCount) console.warn('OWNER_EMAIL does not match an existing user account');
 }
 
+const deviceIdRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const devicePairHash = secret => createHmac('sha256', JWT_SECRET).update(secret).digest('hex');
+const withDeviceLock = async (userId, action) => {
+  const lockUntil = new Date(Date.now() + 60_000);
+  const acquired = await users.updateOne({
+    _id: oid(userId),
+    $or: [{ deviceLinkLockUntil: { $exists: false } }, { deviceLinkLockUntil: { $lt: new Date() } }],
+  }, { $set: { deviceLinkLockUntil: lockUntil } });
+  if (!acquired.matchedCount) return { error: 'Another device operation is in progress. Try again.', status: 409 };
+  try {
+    return await action();
+  } finally {
+    await users.updateOne({ _id: oid(userId), deviceLinkLockUntil: lockUntil }, { $unset: { deviceLinkLockUntil: '' } });
+  }
+};
+const ensureDeviceSession = async (user, deviceId, name, allowAdditional = false) => withDeviceLock(String(user._id), async () => {
+  const existing = await deviceSessions.findOne({ _id: deviceId });
+  if (existing) {
+    if (existing.userId !== String(user._id)) return { error: 'This browser device ID belongs to another account.', status: 409, deviceIdConflict: true };
+    if (existing.revokedAt) return { error: 'This device session has been revoked. Link this device again.', status: 403 };
+    await deviceSessions.updateOne({ _id: deviceId }, { $set: { name, lastSeenAt: new Date() } });
+    return { device: { ...existing, name, lastSeenAt: new Date() } };
+  }
+  const activeCount = await deviceSessions.countDocuments({ userId: String(user._id), revokedAt: { $exists: false } });
+  if (!allowAdditional && activeCount > 0) return { error: 'Link this device by scanning the QR code from an existing signed-in device.', status: 403, deviceLinkRequired: true };
+  if (activeCount >= 5) return { error: 'This account already has five active devices. Remove one before adding another.', status: 409 };
+  if (activeCount > 0 && await deviceSessions.countDocuments({ userId: String(user._id), isPrimary: false, revokedAt: { $exists: false } }) >= 4) {
+    return { error: 'This account already has four companion devices. Unlink one before adding another.', status: 409 };
+  }
+  const device = {
+    _id: deviceId, userId: String(user._id), name, isPrimary: activeCount === 0,
+    createdAt: new Date(), lastSeenAt: new Date(),
+  };
+  await deviceSessions.insertOne(device);
+  return { device };
+});
+const deviceInput = (body, res) => {
+  const id = String(body.deviceId || '');
+  const name = String(body.deviceName || 'Web browser').trim().slice(0, 60) || 'Web browser';
+  if (!deviceIdRx.test(id)) {
+    res.status(400).json({ error: 'A valid device ID is required' });
+    return null;
+  }
+  return { id, name };
+};
+const loginWithDevice = async (res, user, device) => {
+  const result = await ensureDeviceSession(user, device.id, device.name);
+  if (result.error) {
+    return res.status(result.status).json({
+      error: result.error,
+      ...(result.deviceLinkRequired && { deviceLinkRequired: true }),
+      ...(result.deviceIdConflict && { deviceIdConflict: true }),
+    });
+  }
+  return res.json({ token: sign(user, device.id), user: accountView(user), device: result.device });
+};
 const auth = (req, res, next) => {
-  try { req.uid = jwt.verify((req.headers.authorization || '').slice(7), JWT_SECRET).id; next(); }
-  catch { res.status(401).json({ error: 'Please sign in again' }); }
+  let claims;
+  try {
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer ')) throw new Error('Missing bearer token');
+    claims = jwt.verify(header.slice(7), JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Please sign in again' });
+  }
+  req.uid = claims.id;
+  req.deviceId = claims.did || null;
+  if (!req.deviceId) return next();
+  deviceSessions.findOne({ _id: req.deviceId, userId: req.uid, revokedAt: { $exists: false } }).then(device => {
+    if (!device) return res.status(401).json({ error: 'This device was unlinked. Please sign in again.' });
+    req.device = device;
+    if (!device.lastSeenAt || Date.now() - device.lastSeenAt.getTime() > 5 * 60_000) {
+      deviceSessions.updateOne({ _id: device._id }, { $set: { lastSeenAt: new Date() } }).catch(error => console.error('Unable to update device activity:', error));
+    }
+    next();
+  }).catch(error => {
+    console.error('Unable to validate device session:', error);
+    res.status(500).json({ error: 'Unable to validate device session' });
+  });
 };
 const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); res.status(500).json({ error: 'Server error' }); });
 const admin = (req, res, next) => {
@@ -218,14 +296,13 @@ async function chatView(c, me) {
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 app.get('/api/config', (_, res) => res.json({
-  allowPublicSignUp: !OWNER_EMAIL,
+  allowPublicSignUp: true,
   vapidPublicKey,
   pushNotificationsEnabled: true,
   mediaEnabled: mediaEnabled,
 }));
 
 app.post('/api/register', wrap(async (req, res) => {
-  if (OWNER_EMAIL) return res.status(403).json({ error: 'Ask the account owner to create your account' });
   const username = String(req.body.username || '').trim().toLowerCase().replace(/^@/, '');
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
@@ -264,6 +341,8 @@ app.post('/api/register', wrap(async (req, res) => {
 }));
 
 app.post('/api/verify-email', wrap(async (req, res) => {
+  const device = deviceInput(req.body, res);
+  if (!device) return;
   const email = String(req.body.email || '').trim().toLowerCase();
   const code = String(req.body.code || '').trim();
   if (!emailRx.test(email) || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the six-digit code sent to your email' });
@@ -286,7 +365,7 @@ app.post('/api/verify-email', wrap(async (req, res) => {
     const r = await users.insertOne({ username: pending.username, email, hash: pending.hash, created: Date.now(), verified: true });
     await pendingUsers.deleteOne({ _id: pending._id });
     const u = { _id: r.insertedId, username: pending.username, email };
-    res.json({ token: sign(u), user: accountView(u) });
+    await loginWithDevice(res, u, device);
   } catch (e) {
     if (e.code === 11000) return res.status(409).json({ error: 'Email or username already in use' });
     throw e;
@@ -294,10 +373,130 @@ app.post('/api/verify-email', wrap(async (req, res) => {
 }));
 
 app.post('/api/login', wrap(async (req, res) => {
+  const device = deviceInput(req.body, res);
+  if (!device) return;
   const id = String(req.body.email || '').trim().toLowerCase().replace(/^@/, '');
   const u = await users.findOne(id.includes('@') ? { email: id } : { username: id });
   if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.hash))) return res.status(401).json({ error: 'Wrong email/username or password' });
-  res.json({ token: sign(u), user: accountView(u) });
+  await loginWithDevice(res, u, device);
+}));
+
+app.post('/api/devices/current', auth, wrap(async (req, res) => {
+  const device = deviceInput(req.body, res);
+  if (!device) return;
+  const user = await users.findOne({ _id: oid(req.uid) });
+  if (!user) return res.status(401).json({ error: 'Unknown user' });
+  if (req.deviceId) {
+    if (req.deviceId !== device.id) return res.status(409).json({ error: 'The signed-in device ID does not match this browser' });
+    return res.json({ device: req.device });
+  }
+  const result = await ensureDeviceSession(user, device.id, device.name, !req.deviceId);
+  if (result.error) return res.status(result.status).json({ error: result.error });
+  res.json({ token: sign(user, device.id), user: accountView(user), device: result.device });
+}));
+
+app.get('/api/devices', auth, wrap(async (req, res) => {
+  const list = await deviceSessions.find({ userId: req.uid, revokedAt: { $exists: false } }).sort({ isPrimary: -1, createdAt: 1 }).toArray();
+  res.json(list.map(device => ({
+    id: device._id,
+    name: device.name,
+    isPrimary: Boolean(device.isPrimary),
+    current: device._id === req.deviceId,
+    createdAt: device.createdAt,
+    lastSeenAt: device.lastSeenAt,
+  })));
+}));
+
+app.delete('/api/devices/:id', auth, wrap(async (req, res) => {
+  if (!deviceIdRx.test(req.params.id)) return res.status(400).json({ error: 'Invalid device ID' });
+  if (req.params.id === req.deviceId) return res.status(400).json({ error: 'Use sign out to remove the current device' });
+  const result = await deviceSessions.updateOne(
+    { _id: req.params.id, userId: req.uid, revokedAt: { $exists: false } },
+    { $set: { revokedAt: new Date() } },
+  );
+  if (!result.matchedCount) return res.status(404).json({ error: 'Active device not found' });
+  await pushSubs.deleteMany({ userId: req.uid, deviceId: req.params.id });
+  io.in(`d:${req.params.id}`).disconnectSockets(true);
+  res.json({ ok: true });
+}));
+
+app.post('/api/devices/pairing', wrap(async (req, res) => {
+  const device = deviceInput(req.body, res);
+  if (!device) return;
+  const secret = randomBytes(32).toString('base64url');
+  const requestId = randomUUID();
+  const now = new Date();
+  await devicePairings.insertOne({
+    _id: requestId, deviceId: device.id, deviceName: device.name,
+    secretHash: devicePairHash(secret), status: 'pending',
+    createdAt: now, expiresAt: new Date(now.getTime() + 5 * 60_000),
+  });
+  res.set('Cache-Control', 'no-store');
+  res.status(201).json({ requestId, secret, deviceName: device.name, expiresAt: new Date(now.getTime() + 5 * 60_000) });
+}));
+
+app.post('/api/devices/pairing/:id/claim', wrap(async (req, res) => {
+  const secret = String(req.body.secret || '');
+  if (!deviceIdRx.test(req.params.id) || secret.length < 40) return res.status(400).json({ error: 'Invalid device pairing request' });
+  const pairing = await devicePairings.findOne({ _id: req.params.id });
+  if (!pairing || pairing.expiresAt <= new Date()) return res.status(410).json({ error: 'Pairing request expired. Start again on the new device.' });
+  const expected = Buffer.from(pairing.secretHash, 'hex');
+  const supplied = Buffer.from(devicePairHash(secret), 'hex');
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return res.status(404).json({ error: 'Pairing request not found' });
+  if (pairing.status !== 'approved') return res.json({ status: 'pending' });
+  const user = await users.findOne({ _id: oid(pairing.userId) });
+  const device = await deviceSessions.findOne({ _id: pairing.deviceId, userId: pairing.userId, revokedAt: { $exists: false } });
+  if (!user || !device) return res.status(410).json({ error: 'This device link is no longer active' });
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'approved', token: sign(user, device._id), user: accountView(user), device });
+}));
+
+app.post('/api/devices/pairings/:id/approve', auth, wrap(async (req, res) => {
+  if (!req.deviceId) return res.status(403).json({ error: 'Refresh this device session before approving links' });
+  if (!deviceIdRx.test(req.params.id)) return res.status(400).json({ error: 'Invalid pairing request' });
+  const pairing = await devicePairings.findOne({ _id: req.params.id, status: 'pending', expiresAt: { $gt: new Date() } });
+  if (!pairing) return res.status(404).json({ error: 'Pairing request expired or already handled' });
+  const secret = String(req.body.secret || '');
+  if (secret.length < 40) return res.status(400).json({ error: 'The QR code is invalid' });
+  const expected = Buffer.from(pairing.secretHash, 'hex');
+  const supplied = Buffer.from(devicePairHash(secret), 'hex');
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return res.status(404).json({ error: 'Pairing request not found' });
+  const result = await withDeviceLock(req.uid, async () => {
+    const activeCount = await deviceSessions.countDocuments({ userId: req.uid, revokedAt: { $exists: false } });
+    if (activeCount >= 5) return { error: 'This account already has five active devices. Remove one before adding another.', status: 409 };
+    const previous = await deviceSessions.findOne({ _id: pairing.deviceId });
+    if (previous && (previous.userId !== req.uid || !previous.revokedAt)) return { error: 'This device ID is already in use', status: 409 };
+    const companionCount = await deviceSessions.countDocuments({ userId: req.uid, isPrimary: false, revokedAt: { $exists: false } });
+    if (companionCount >= 4) return { error: 'This account already has four companion devices. Unlink one before adding another.', status: 409 };
+    const device = {
+      _id: pairing.deviceId, userId: req.uid, name: pairing.deviceName, isPrimary: false,
+      createdAt: new Date(), lastSeenAt: new Date(),
+    };
+    if (previous) {
+      const restored = await deviceSessions.updateOne(
+        { _id: previous._id, userId: req.uid, revokedAt: previous.revokedAt },
+        { $set: { name: device.name, lastSeenAt: device.lastSeenAt }, $unset: { revokedAt: '' } },
+      );
+      if (!restored.modifiedCount) return { error: 'This device session changed. Scan the QR code again.', status: 409 };
+    } else {
+      await deviceSessions.insertOne(device);
+    }
+    const approved = await devicePairings.updateOne(
+      { _id: pairing._id, status: 'pending', expiresAt: { $gt: new Date() } },
+      { $set: { status: 'approved', userId: req.uid, approvedAt: new Date() } },
+    );
+    if (!approved.modifiedCount) {
+      if (previous) {
+        await deviceSessions.updateOne({ _id: previous._id, userId: req.uid }, { $set: { revokedAt: previous.revokedAt } });
+      } else {
+        await deviceSessions.deleteOne({ _id: device._id, userId: req.uid });
+      }
+      return { error: 'Pairing request expired or already handled', status: 409 };
+    }
+    return { device };
+  });
+  if (result.error) return res.status(result.status).json({ error: result.error });
+  res.json({ ok: true });
 }));
 
 app.post('/api/admin/users', auth, admin, wrap(async (req, res) => {
@@ -338,6 +537,121 @@ app.get('/api/admin/users', auth, admin, wrap(async (req, res) => {
     total,
     offset,
     limit: 50,
+  });
+}));
+
+app.delete('/api/admin/users/:id', auth, admin, wrap(async (req, res) => {
+  const userId = oid(req.params.id);
+  if (!userId) return res.status(400).json({ error: 'Invalid account' });
+  const userIdString = String(userId);
+  if (userIdString === req.uid) return res.status(403).json({ error: 'You cannot delete your own account' });
+  const user = await users.findOne({ _id: userId });
+  if (!user) return res.status(404).json({ error: 'Account not found' });
+  if (OWNER_EMAIL && user.email === OWNER_EMAIL.trim().toLowerCase()) {
+    return res.status(403).json({ error: 'The configured owner account cannot be deleted' });
+  }
+  if (user.role === 'admin' && await users.countDocuments({ role: 'admin' }) <= 1) {
+    return res.status(409).json({ error: 'The last admin account cannot be deleted' });
+  }
+
+  const userChats = await chats.find({ members: userIdString }, { projection: { _id: 1, members: 1 } }).toArray();
+  const chatIds = userChats.map(chat => String(chat._id));
+  const sessions = await deviceSessions.find({ userId: userIdString }, { projection: { _id: 1 } }).toArray();
+  const deviceIds = sessions.map(device => device._id);
+  const posts = await activityPosts.find({ authorId: userIdString }, { projection: { attachments: 1 } }).toArray();
+  const messages = chatIds.length
+    ? await msgs.find({ chatId: { $in: chatIds } }, { projection: { attachments: 1 } }).toArray()
+    : [];
+  const mediaPrefixes = [
+    `profile/${userIdString}/`,
+    `activity/${userIdString}/`,
+    ...userChats.flatMap(chat => (chat.members || []).map(memberId => `${chat._id}/${memberId}/`)),
+  ];
+  const mediaKeys = new Set([
+    user.avatarKey,
+    ...posts.flatMap(post => (post.attachments || []).map(item => item.key)),
+    ...messages.flatMap(message => (message.attachments || []).map(item => item.key)),
+  ].filter(key => typeof key === 'string' && mediaPrefixes.some(prefix => key.startsWith(prefix))));
+  let objectKeys = [];
+  if (r2Configured) {
+    for (const prefix of mediaPrefixes) {
+      let continuationToken;
+      do {
+        const page = await r2.send(new ListObjectsV2Command({
+          Bucket: R2_BUCKET_NAME, Prefix: prefix, ContinuationToken: continuationToken,
+        }));
+        objectKeys.push(...(page.Contents || []).map(object => object.Key).filter(Boolean));
+        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+      } while (continuationToken);
+    }
+  }
+
+  await Promise.all([
+    msgs.deleteMany({ chatId: { $in: chatIds } }),
+    chats.deleteMany({ members: userIdString }),
+    activityPosts.deleteMany({ authorId: userIdString }),
+    friendships.deleteMany({ $or: [{ fromId: userIdString }, { toId: userIdString }] }),
+    calls.deleteMany({ participants: userIdString }),
+    locationShares.deleteMany({
+      $or: [{ ownerId: userIdString }, { peerId: userIdString }, { participants: userIdString }],
+    }),
+    pushSubs.deleteMany({ userId: userIdString }),
+    deviceSessions.deleteMany({ userId: userIdString }),
+    devicePairings.deleteMany({
+      $or: [{ userId: userIdString }, ...(deviceIds.length ? [{ deviceId: { $in: deviceIds } }] : [])],
+    }),
+    pendingUsers.deleteMany({ email: user.email }),
+  ]);
+  await users.deleteOne({ _id: userId });
+  io.to(`u:${userIdString}`).emit('account:deleted');
+  for (const chat of userChats) {
+    const remainingMembers = (chat.members || []).filter(id => id !== userIdString);
+    io.to(remainingMembers.map(id => `u:${id}`)).emit('account:changed');
+  }
+
+  let cleanupFailures = 0;
+  if (r2Configured) {
+    const keys = [...new Set([...objectKeys, ...mediaKeys])];
+    for (let offset = 0; offset < keys.length; offset += 1000) {
+      try {
+        const result = await r2.send(new DeleteObjectsCommand({
+          Bucket: R2_BUCKET_NAME,
+          Delete: { Objects: keys.slice(offset, offset + 1000).map(Key => ({ Key })), Quiet: true },
+        }));
+        if (result.Errors?.length) console.error(`Unable to remove ${result.Errors.length} R2 media object(s) for account ${userIdString}`);
+        cleanupFailures += result.Errors?.length || 0;
+      } catch (error) {
+        console.error(`Unable to remove account media for ${userIdString}:`, error);
+        cleanupFailures += keys.slice(offset).length;
+        break;
+      }
+    }
+  } else {
+    for (const prefix of mediaPrefixes) {
+      const directory = path.resolve(localUploadsDir, ...prefix.split('/'));
+      if (!directory.startsWith(`${localUploadsDir}${path.sep}`)) {
+        throw new Error('Refusing to remove account media outside the upload directory');
+      }
+      try {
+        await fs.rm(directory, { recursive: true, force: true });
+      } catch (error) {
+        console.error(`Unable to remove account media for ${userIdString}:`, error);
+        cleanupFailures += 1;
+      }
+    }
+    for (const key of mediaKeys) {
+      if (mediaPrefixes.some(prefix => key.startsWith(prefix))) continue;
+      try {
+        await removeStoredMedia(key);
+      } catch (error) {
+        console.error(`Unable to remove account media for ${userIdString}:`, error);
+        cleanupFailures += 1;
+      }
+    }
+  }
+  res.json({
+    ok: true,
+    mediaCleanupWarning: cleanupFailures ? `${cleanupFailures} media cleanup operation(s) failed` : null,
   });
 }));
 
@@ -407,7 +721,7 @@ app.get('/api/calls/history', auth, wrap(async (req, res) => {
 app.post('/api/push/subscribe', auth, wrap(async (req, res) => {
   const subscription = req.body.subscription;
   if (!subscription?.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) return res.status(400).json({ error: 'Invalid push subscription' });
-  await pushSubs.updateOne({ endpoint: subscription.endpoint }, { $set: { endpoint: subscription.endpoint, subscription, userId: req.uid, updatedAt: Date.now() } }, { upsert: true });
+  await pushSubs.updateOne({ endpoint: subscription.endpoint }, { $set: { endpoint: subscription.endpoint, subscription, userId: req.uid, deviceId: req.deviceId, updatedAt: Date.now() } }, { upsert: true });
   res.json({ ok: true });
 }));
 
@@ -877,10 +1191,40 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
 }));
 
 io.use((s, next) => {
-  try { s.uid = jwt.verify(s.handshake.auth.token, JWT_SECRET).id; next(); } catch { next(new Error('auth')); }
+  let claims;
+  try { claims = jwt.verify(s.handshake.auth.token, JWT_SECRET); } catch { return next(new Error('auth')); }
+  s.uid = claims.id;
+  s.deviceId = claims.did || null;
+  if (!s.deviceId) return next();
+  deviceSessions.findOne({ _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false } }).then(device => {
+    if (!device) return next(new Error('auth'));
+    next();
+  }).catch(error => {
+    console.error('Unable to validate socket device session:', error);
+    next(new Error('auth'));
+  });
 });
 io.on('connection', s => {
   s.join('u:' + s.uid);
+  if (s.deviceId) s.join('d:' + s.deviceId);
+  let deviceCheck;
+  if (s.deviceId) {
+    const validateDevice = () => deviceSessions.findOne({
+      _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false },
+    }).then(device => {
+      if (!device) s.disconnect(true);
+    }).catch(error => console.error('Unable to revalidate socket device session:', error));
+    s.use((_, next) => {
+      deviceSessions.findOne({ _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false } })
+        .then(device => next(device ? undefined : new Error('auth')))
+        .catch(error => {
+          console.error('Unable to validate socket device event:', error);
+          next(new Error('auth'));
+        });
+    });
+    deviceCheck = setInterval(validateDevice, 30_000);
+  }
+  s.on('disconnect', () => { if (deviceCheck) clearInterval(deviceCheck); });
   const recordReceipt = async ({ chatId, messageId } = {}, status) => {
     try {
       const chat = typeof chatId === 'string' && await member(chatId, s.uid);
@@ -928,7 +1272,15 @@ io.on('connection', s => {
     const chat = typeof chatId === 'string' && await member(chatId, s.uid);
     if (!chat || typeof callId !== 'string' || !signal || !['answer', 'candidate'].includes(signal.type)) return;
     const peerId = chat.members.find(id => id !== s.uid);
-    if (signal.type === 'answer') await calls.updateOne({ callId, chatId, participants: s.uid, status: 'ringing' }, { $set: { status: 'active', connectedAt: Date.now() } });
+    if (!peerId) return;
+    if (signal.type === 'answer') {
+      const accepted = await calls.updateOne(
+        { callId, chatId, from: peerId, to: s.uid, status: 'ringing' },
+        { $set: { status: 'active', connectedAt: Date.now(), answeredByDevice: s.deviceId } },
+      );
+      if (!accepted.modifiedCount) return;
+      io.to('u:' + s.uid).emit('call:answered-elsewhere', { chatId, callId, acceptedDeviceId: s.deviceId });
+    }
     if (peerId) io.to('u:' + peerId).emit('call:signal', { chatId, callId, signal });
   });
   s.on('call:end', async ({ chatId, callId, reason } = {}) => {
@@ -942,6 +1294,7 @@ io.on('connection', s => {
         : 'ended';
       await calls.updateOne({ _id: record._id }, { $set: { status, endedAt: Date.now() } });
     }
+    if (s.uid !== record?.from) io.to('u:' + s.uid).emit('call:answered-elsewhere', { chatId, callId });
     if (peerId) io.to('u:' + peerId).emit('call:ended', { chatId, callId, reason: reason === 'declined' ? 'declined' : 'ended' });
   });
 });

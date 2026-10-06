@@ -1,6 +1,23 @@
 {
-  "name": "nepachat-web", "version": "1.0.0", "private": true, "type": "module",
-  "scripts": { "dev": "vite --host", "build": "vite build", "deploy": "vite build && wrangler pages deploy dist --project-name nepachat" },
-  "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1", "socket.io-client": "^4.7.5" },
-  "devDependencies": { "@vitejs/plugin-react": "^4.3.1", "vite": "^5.4.0", "wrangler": "^4" }
+  "name": "nepachat-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "deploy": "vite build && wrangler pages deploy dist --project-name nepachat"
+  },
+  "dependencies": {
+    "@zxing/browser": "^0.2.1",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socket.io-client": "^4.7.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0",
+    "wrangler": "^4"
+  }
 }
