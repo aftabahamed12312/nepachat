@@ -24,7 +24,7 @@ Image and MP4/WebM video attachments up to 25 MB work without R2: the API stores
 
 For a deployed service, local filesystem uploads are only durable if the host provides persistent storage. Render's default filesystem is ephemeral, so files can disappear on redeploy or instance replacement. To use local storage on Render, attach a persistent disk, set its mount path (for example `/var/data`) and set `UPLOADS_DIR=/var/data/uploads`. Alternatively, configure a Cloudflare R2 bucket and S3 API token with object read/write permission by setting `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME`; with R2 configured, uploads use the bucket and downloads use signed URLs.
 
-For device notifications for calls, messages, friend requests, and activity posts, generate VAPID keys with `npx web-push generate-vapid-keys` and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in Render. Users must tap **Enable device notifications** and grant browser permission. The app must run over HTTPS; on iOS, install NepaChat to the Home Screen to receive Web Push notifications. For reliable calls across restrictive networks, configure Cloudflare TURN as described below.
+For device notifications for calls, messages, friend requests, and activity posts, the API creates a VAPID key pair on first startup and stores it in the private `systemSettings` collection in MongoDB. Keep the MongoDB database persistent and private; do not delete that settings record, since existing browser subscriptions depend on the same key pair. To provide your own stable pair instead, set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and optionally `VAPID_SUBJECT` in the API environment. Users must tap **Enable device notifications** and grant browser permission. The app must run over HTTPS; on iOS, install NepaChat to the Home Screen to receive Web Push notifications. For reliable calls across restrictive networks, configure Cloudflare TURN as described below.
 
 ## Production Environment Template
 Add these values in Render's environment settings. Never put real database passwords, SMTP passwords, or tokens in this README, Git, or the Cloudflare frontend environment.
@@ -42,6 +42,7 @@ R2_ACCOUNT_ID=<cloudflare-account-id>
 R2_ACCESS_KEY_ID=<r2-access-key-id>
 R2_SECRET_ACCESS_KEY=<r2-secret-access-key>
 R2_BUCKET_NAME=<r2-bucket-name>
+# Optional: omit to let the API create and persist a VAPID key pair in MongoDB.
 VAPID_PUBLIC_KEY=<web-push-public-key>
 VAPID_PRIVATE_KEY=<web-push-private-key>
 VAPID_SUBJECT=mailto:admin@nepachat.pages.dev
@@ -50,7 +51,7 @@ TURN_API_TOKEN=<cloudflare-turn-key-secret>
 OTP_DEV_MODE=false
 ```
 
-Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Create the R2 bucket/access key, VAPID key pair, and Cloudflare TURN key before setting their corresponding secrets. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
+Enable the Gmail API in Google Cloud, create an OAuth client, authorize the `https://www.googleapis.com/auth/gmail.send` scope with offline access, then set these values as Render environment secrets. `GMAIL_FROM` must match the authorized Gmail account. Render Free blocks SMTP ports `25`, `465`, and `587`, so the Gmail API HTTPS path is used when configured. Create the R2 bucket/access key and Cloudflare TURN key before setting their corresponding secrets. VAPID environment values are optional when the API can write to MongoDB. Atlas's downloaded environment file calls its URI `MONGODB_URI`; set that value as `MONGO_URL` in Render. URL-encode reserved characters in the database password. Rotate credentials if they have been shared or committed.
 
 For reliable calls, create a Cloudflare Realtime TURN key in the Cloudflare dashboard. Set its returned `uid` as Render's `TURN_KEY_ID` and its returned `key` as `TURN_API_TOKEN`. The API requests fresh 48-hour ICE credentials for authenticated callers; the long-lived TURN key never reaches the browser. Cloudflare documents 1,000 GB of free TURN egress, with usage-based charges beyond that.
 

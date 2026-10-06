@@ -20,12 +20,13 @@ const {
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
   TURN_KEY_ID, TURN_API_TOKEN, TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OWNER_EMAIL = '', OTP_DEV_MODE = 'false',
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, UPLOADS_DIR,
-  VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT = 'mailto:admin@nepachat.pages.dev',
+  VAPID_PUBLIC_KEY: ENV_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY: ENV_VAPID_PRIVATE_KEY,
+  VAPID_SUBJECT = 'mailto:admin@nepachat.pages.dev',
 } = process.env;
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -58,7 +59,31 @@ const r2 = r2Configured ? new S3Client({
   credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
 }) : null;
 app.use('/uploads', express.static(localUploadsDir, { index: false }));
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+let vapidPublicKey = ENV_VAPID_PUBLIC_KEY;
+let vapidPrivateKey = ENV_VAPID_PRIVATE_KEY;
+if (!vapidPublicKey || !vapidPrivateKey) {
+  const stored = await systemSettings.findOne({ _id: 'vapid' });
+  if (stored?.publicKey && stored?.privateKey) {
+    vapidPublicKey = stored.publicKey;
+    vapidPrivateKey = stored.privateKey;
+  } else {
+    const generated = webpush.generateVAPIDKeys();
+    const keys = { _id: 'vapid', publicKey: generated.publicKey, privateKey: generated.privateKey };
+    try {
+      await systemSettings.insertOne(keys);
+      vapidPublicKey = keys.publicKey;
+      vapidPrivateKey = keys.privateKey;
+      console.info('Generated persistent VAPID keys in the application settings store.');
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+      const winner = await systemSettings.findOne({ _id: 'vapid' });
+      if (!winner?.publicKey || !winner?.privateKey) throw error;
+      vapidPublicKey = winner.publicKey;
+      vapidPrivateKey = winner.privateKey;
+    }
+  }
+}
+webpush.setVapidDetails(VAPID_SUBJECT, vapidPublicKey, vapidPrivateKey);
 const mailer = SMTP_HOST && SMTP_USER && SMTP_PASS ? nodemailer.createTransport({
   host: SMTP_HOST, port: Number(SMTP_PORT), secure: SMTP_SECURE === 'true',
   connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000,
@@ -138,7 +163,6 @@ const admin = (req, res, next) => {
 };
 
 async function notifyUser(userId, notification) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   const subscriptions = await pushSubs.find({ userId }).toArray();
   await Promise.all(subscriptions.map(async item => {
     try {
@@ -195,7 +219,8 @@ async function chatView(c, me) {
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 app.get('/api/config', (_, res) => res.json({
   allowPublicSignUp: !OWNER_EMAIL,
-  vapidPublicKey: VAPID_PUBLIC_KEY || null,
+  vapidPublicKey,
+  pushNotificationsEnabled: true,
   mediaEnabled: mediaEnabled,
 }));
 
@@ -381,7 +406,6 @@ app.get('/api/calls/history', auth, wrap(async (req, res) => {
 
 app.post('/api/push/subscribe', auth, wrap(async (req, res) => {
   const subscription = req.body.subscription;
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(503).json({ error: 'Push notifications are not configured' });
   if (!subscription?.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) return res.status(400).json({ error: 'Invalid push subscription' });
   await pushSubs.updateOne({ endpoint: subscription.endpoint }, { $set: { endpoint: subscription.endpoint, subscription, userId: req.uid, updatedAt: Date.now() } }, { upsert: true });
   res.json({ ok: true });

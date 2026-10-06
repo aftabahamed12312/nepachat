@@ -86,40 +86,52 @@ function Auth({ onAuth, allowPublicSignUp }) {
 
 function CallPanel({ callState, localStream, remoteStream, layout, onLayoutChange, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
+  const panelRef = useRef();
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef(null);
   useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
   useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
   useEffect(() => {
-    if (!['overlay', 'split'].includes(layout) || !dragRef.current) return;
     const onPointerMove = event => {
       if (!dragRef.current) return;
-      const nextX = Math.min(220, Math.max(-220, dragRef.current.offsetX + (event.clientX - dragRef.current.startX)));
-      const nextY = Math.min(160, Math.max(-160, dragRef.current.offsetY + (event.clientY - dragRef.current.startY)));
+      const rect = dragRef.current.rect;
+      const deltaX = event.clientX - dragRef.current.startX;
+      const deltaY = event.clientY - dragRef.current.startY;
+      const nextX = dragRef.current.offsetX + Math.min(window.innerWidth - rect.right, Math.max(-rect.left, deltaX));
+      const nextY = dragRef.current.offsetY + Math.min(window.innerHeight - rect.bottom, Math.max(-rect.top, deltaY));
       setDragOffset({ x: nextX, y: nextY });
     };
     const onPointerUp = () => { dragRef.current = null; };
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
     return () => {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
     };
-  }, [layout]);
+  }, []);
   if (!callState) return null;
   const label = callState.incoming ? `Incoming ${callState.kind} call` : callState.status === 'calling' ? 'Calling…' : callState.status === 'active' ? 'Connected' : 'Connecting…';
   const handleDragStart = event => {
-    if (!['overlay', 'split'].includes(layout) || event.button !== 0 || event.target.closest('button')) return;
-    dragRef.current = { startX: event.clientX, startY: event.clientY, offsetX: dragOffset.x, offsetY: dragOffset.y };
+    if (event.button !== 0 || event.target.closest('button')) return;
+    event.preventDefault();
+    dragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: dragOffset.x,
+      offsetY: dragOffset.y,
+      rect: panelRef.current.getBoundingClientRect(),
+    };
   };
   const panelStyle = layout === 'overlay'
     ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 }
     : layout === 'split'
       ? { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }
-      : undefined;
+      : { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` };
   return (
     <div className={'call-shell call-shell-' + layout}>
-      <section className="call-panel" aria-label="Call" style={panelStyle} onPointerDown={handleDragStart}>
+      <section ref={panelRef} className="call-panel" aria-label="Call" style={panelStyle} onPointerDown={handleDragStart}>
         <header>
           <div><b>{callState.peerName}</b><small>{label}</small></div>
           {!callState.incoming && <div className="call-layout-actions">
@@ -416,7 +428,7 @@ function LocationShareDialog({ onStart, onClose }) {
 
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
-  const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, mediaEnabled: false });
+  const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
@@ -507,7 +519,7 @@ export default function App() {
     setPushError('');
     try {
       if (!('Notification' in window)) throw new Error('Notifications are not supported in this browser');
-      if (!publicConfig.vapidPublicKey) throw new Error('Device notifications are not configured on the server yet');
+      if (!publicConfig.pushNotificationsEnabled || !publicConfig.vapidPublicKey) throw new Error('Device notifications need VAPID keys configured on the API server. See the deployment setup instructions.');
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('Push notifications are not supported in this browser');
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') throw new Error('Allow notifications in your browser to receive call alerts');
@@ -1031,7 +1043,7 @@ export default function App() {
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
         <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
         <button className={'hbtn' + (pushEnabled ? ' push-on' : '')}
-          title={pushEnabled ? 'Device notifications enabled' : publicConfig.vapidPublicKey ? 'Enable device notifications' : 'Device notifications are not configured'}
+          title={pushEnabled ? 'Device notifications enabled' : publicConfig.pushNotificationsEnabled ? 'Enable device notifications' : 'Device notifications need API server setup'}
           aria-label={pushEnabled ? 'Device notifications enabled' : 'Enable device notifications'}
           onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>
         <button className="hbtn" title="New chat" onClick={() => setModal(true)}>＋</button>
