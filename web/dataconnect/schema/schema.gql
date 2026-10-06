@@ -1,0 +1,28 @@
+type User @table {
+  phoneNumber: String!
+  displayName: String!
+  photoUrl: String
+  lastSeenAt: Timestamp
+}
+
+type Chat @table {
+  type: String!
+  createdAt: Timestamp!
+  name: String
+  lastMessagePreview: String
+}
+
+type Membership @table {
+  user: User!
+  chat: Chat!
+  joinedAt: Timestamp!
+  lastReadAt: Timestamp
+}
+
+type Message @table {
+  chat: Chat!
+  sender: User!
+  content: String!
+  createdAt: Timestamp!
+  status: String
+}

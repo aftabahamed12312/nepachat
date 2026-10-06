@@ -1,0 +1,101 @@
+mutation CreateUser @auth(level: USER) {
+  user_insert(data: { id_expr: "auth.uid", phoneNumber: "1234567890", displayName: "New User" })
+}
+
+mutation UpdateUser @auth(level: USER) {
+  user_update(key: { id_expr: "auth.uid" }, data: { displayName: "Updated Name" })
+}
+
+mutation DeleteUser @auth(level: USER) {
+  user_delete(key: { id_expr: "auth.uid" })
+}
+
+query GetUser @auth(level: USER) {
+  user(key: { id_expr: "auth.uid" }) {
+    displayName
+    phoneNumber
+  }
+}
+
+query ListUsers @auth(level: PUBLIC, insecureReason: "Public user directory") {
+  users(limit: 50) {
+    displayName
+  }
+}
+
+mutation CreateChat @auth(level: USER) {
+  chat_insert(data: { type: "group", createdAt_expr: "request.time", name: "General" })
+}
+
+mutation UpdateChat($id: UUID!) @auth(level: USER) {
+  chat_update(id: $id, data: { name: "Renamed Chat" })
+}
+
+mutation DeleteChat($id: UUID!) @auth(level: USER) {
+  chat_delete(id: $id)
+}
+
+query GetChat($id: UUID!) @auth(level: USER) {
+  chat(id: $id) {
+    name
+    type
+  }
+}
+
+query ListChats @auth(level: USER) {
+  chats(limit: 20) {
+    name
+    type
+  }
+}
+
+mutation CreateMembership($chatId: UUID!) @auth(level: USER) {
+  membership_insert(data: { userId_expr: "auth.uid", chatId: $chatId, joinedAt_expr: "request.time" })
+}
+
+mutation UpdateMembership($id: UUID!) @auth(level: USER) {
+  membership_update(id: $id, data: { lastReadAt_expr: "request.time" })
+}
+
+mutation DeleteMembership($id: UUID!) @auth(level: USER) {
+  membership_delete(id: $id)
+}
+
+query GetMembership($id: UUID!) @auth(level: USER) {
+  membership(id: $id) {
+    joinedAt
+    chat { name }
+  }
+}
+
+query ListMyMemberships @auth(level: USER) {
+  memberships(where: { userId: { eq_expr: "auth.uid" } }) {
+    chat { name }
+  }
+}
+
+mutation SendMessage($chatId: UUID!, $content: String!) @auth(level: USER) {
+  message_insert(data: { chatId: $chatId, senderId_expr: "auth.uid", content: $content, createdAt_expr: "request.time" })
+}
+
+mutation UpdateMessage($id: UUID!, $status: String!) @auth(level: USER) {
+  message_update(id: $id, data: { status: $status })
+}
+
+mutation DeleteMessage($id: UUID!) @auth(level: USER) {
+  message_delete(id: $id)
+}
+
+query GetMessage($id: UUID!) @auth(level: USER) {
+  message(id: $id) {
+    content
+    createdAt
+  }
+}
+
+query ListMessagesInChat($chatId: UUID!) @auth(level: USER) {
+  messages(where: { chatId: { eq: $chatId } }, orderBy: [{ createdAt: DESC }]) {
+    content
+    sender { displayName }
+  }
+}
