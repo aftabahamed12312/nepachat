@@ -256,8 +256,8 @@ const deviceInput = (body, res) => {
   }
   return { id, name };
 };
-const loginWithDevice = async (res, user, device) => {
-  const result = await ensureDeviceSession(user, device.id, device.name);
+const loginWithDevice = async (res, user, device, allowAdditional = false) => {
+  const result = await ensureDeviceSession(user, device.id, device.name, allowAdditional);
   if (result.error) {
     return res.status(result.status).json({
       error: result.error,
@@ -428,7 +428,7 @@ app.post('/api/login', wrap(async (req, res) => {
   const id = String(req.body.email || '').trim().toLowerCase().replace(/^@/, '');
   const u = await users.findOne(id.includes('@') ? { email: id } : { username: id });
   if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.hash))) return res.status(401).json({ error: 'Wrong email/username or password' });
-  await loginWithDevice(res, u, device);
+  await loginWithDevice(res, u, device, true);
 }));
 
 app.post('/api/devices/current', auth, wrap(async (req, res) => {

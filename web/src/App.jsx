@@ -168,7 +168,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
         {allowPublicSignUp
           ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
           : <p className="sw">Account creation is managed by the owner.</p>}
-        {mode === 'login' && <button type="button" className="text-button" onClick={startPairing}>Link a companion device</button>}
+        {mode === 'login' && <button type="button" className="text-button" onClick={startPairing}>Or link this device with a QR code</button>}
       </form>
     </div>
   );
