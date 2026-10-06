@@ -385,11 +385,21 @@ function CallPanel({ callState, localStream, remoteStream, peerConnection, audio
           </div>}
         </header>
         {callState.error && <p className="err call-error">{callState.error}</p>}
-        <div className={'call-stage' + (callState.kind === 'audio' ? ' audio-stage' : '')}>
-          <video ref={remoteRef} autoPlay playsInline className="remote-video" />
+        <div className={'call-stage' + (callState.kind === 'audio' ? ' audio-stage' : callState.kind === 'video' ? ' video-stage' : '')}>
+          {callState.kind === 'video' ? <>
+            <div className="call-video-tile">
+              {!remoteStream && <span className="call-video-placeholder">{label}</span>}
+              <video ref={remoteRef} autoPlay playsInline className="remote-video" aria-label={`${callState.peerName} video`} />
+              <span className="call-video-name">{callState.peerName}</span>
+            </div>
+            <div className="call-video-tile">
+              {localStream && videoEnabled
+                ? <video ref={localRef} autoPlay muted playsInline className="local-video" aria-label="Your video" />
+                : <span className="call-video-placeholder">{videoEnabled ? 'Starting camera…' : 'Camera off'}</span>}
+              <span className="call-video-name">You</span>
+            </div>
+          </> : <video ref={remoteRef} autoPlay playsInline className="remote-video" />}
           {callState.kind === 'audio' && <div className="audio-label">{callState.peerName}</div>}
-          {callState.kind === 'video' && localStream && videoEnabled && <video ref={localRef} autoPlay muted playsInline className="local-video" />}
-          {callState.kind === 'video' && !videoEnabled && <div className="video-paused-label">Camera off</div>}
         </div>
         <footer>
           {layout === 'minimized' ? <>
@@ -748,6 +758,16 @@ export default function App() {
   backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-color-scheme: dark)');
+    const updateBrowserTheme = event => {
+      const themeColor = document.querySelector('meta[name="theme-color"]');
+      if (themeColor) themeColor.content = event.matches ? '#101714' : '#053215';
+    };
+    updateBrowserTheme(preference);
+    preference.addEventListener('change', updateBrowserTheme);
+    return () => preference.removeEventListener('change', updateBrowserTheme);
+  }, []);
   const stopLocationTracking = () => {
     if (locationWatchRef.current !== null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
     if (locationTimerRef.current !== null) window.clearTimeout(locationTimerRef.current);
