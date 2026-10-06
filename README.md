@@ -15,34 +15,24 @@ Calls use browser WebRTC for SDP negotiation, trickle ICE, and DTLS-SRTP media e
 
 The local Docker setup seeds one verified demo account on first startup: `nepa_demo` / `nepa-demo@example.test` with password `local-demo-only-2026`. This fixed credential is for local development only. For a different seed, set `SEED_USERNAME`, `SEED_EMAIL`, and `SEED_PASSWORD`; the account is not modified on later starts. Never use the demo password in production. To seed a deployed API, configure those three Wrangler secrets separately.
 
-## Deploy to AWS Elastic Beanstalk and Amplify Hosting
+## Deploy the API to AWS Elastic Beanstalk
 
-The repository includes a root `Dockerfile` for the API and an `amplify.yml` monorepo build specification for the web app. In production, the frontend initializes Firebase Analytics when the browser supports it. Firebase web-app config values are included in the client bundle; restrict the Firebase API key to the deployed web origins in Google Cloud and enable only the required APIs.
+The repository includes a root `Dockerfile` for the API. Deploy the web frontend separately to Cloudflare Pages with Wrangler as described below.
 
 1. Push the repository to GitHub. Do not include `.env`, API keys, passwords, or other secrets.
 2. Create a MongoDB Atlas database and allow connections from the AWS deployment. Keep the database credentials private.
 3. In the AWS Elastic Beanstalk console, create an application and a Docker web-server environment. Upload the repository source bundle with the root `Dockerfile`, or connect the Git repository using the AWS-supported deployment flow. Ensure the source bundle includes the `server` directory and its package lock. Wait for the environment health check and copy its HTTPS URL.
-4. In the Elastic Beanstalk environment configuration, set `PORT=4000`, `MONGO_URL`, a long random `JWT_SECRET`, `OWNER_EMAIL`, `OTP_DEV_MODE=false`, and `CORS_ORIGIN`. For production email, add `RESEND_API_KEY` and `RESEND_FROM`; use secure environment values or AWS Secrets Manager/Systems Manager Parameter Store references for secrets. Do not put credentials in the source bundle. Configure optional `R2_*` values if uploads need persistent object storage; the container filesystem is ephemeral. Set `CORS_ORIGIN` to the exact Amplify app origin once it is known (for initial setup, it can temporarily be `*`, then restrict it and restart the API).
-5. In AWS Amplify Hosting, create a new app connected to the GitHub repository and select the desired branch. Set the required monorepo environment variable `AMPLIFY_MONOREPO_APP_ROOT=web`, plus `VITE_API_URL` to the Elastic Beanstalk API origin (for example, `https://your-api.elasticbeanstalk.com`, without a trailing slash). Set `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`, and `VITE_FIREBASE_MEASUREMENT_ID` to the Firebase web app configuration. The committed `amplify.yml` builds the `web` app and publishes `web/dist`.
-6. After Amplify provides its HTTPS app domain, update Elastic Beanstalk `CORS_ORIGIN` to that exact origin (and any custom frontend domain), then restart/redeploy the API. If you use `nepachat.aftabahamedbhat.com.np` as the frontend custom domain, add that exact HTTPS origin to CORS and configure its DNS/certificate in Amplify.
-7. Test `https://<API-origin>/api/health` and `/api/config`, then open the Amplify URL and test signup, email delivery, uploads, and a chat/call.
+4. In the Elastic Beanstalk environment configuration, set `PORT=4000`, `MONGO_URL`, a long random `JWT_SECRET`, `OWNER_EMAIL`, `OTP_DEV_MODE=false`, and `CORS_ORIGIN` to the exact HTTPS origin of your Cloudflare Pages site (and any custom frontend domain). For production email, add `RESEND_API_KEY` and `RESEND_FROM`; use secure environment values or AWS Secrets Manager/Systems Manager Parameter Store references for secrets. Do not put credentials in the source bundle. Configure optional `R2_*` values if uploads need persistent object storage; the container filesystem is ephemeral.
+5. Test `https://<API-origin>/api/health` and `/api/config`, then open the Cloudflare Pages URL and test signup, email delivery, uploads, and a chat/call.
 
-Elastic Beanstalk and Amplify are separate services: deploy the API first and the web app second. Production account registration needs a verified Resend sender and the corresponding environment variables; the API health endpoint alone does not prove email delivery is configured.
-
-## Deploy the web app to Firebase Hosting
-
-Firebase Hosting serves the static React frontend only; the API still needs to be deployed separately (for example, to Elastic Beanstalk or Render). The repository-root `firebase.json` targets only Hosting and runs the web build before deployment; it does not deploy the Firestore rules or Cloud Functions.
-
-From PowerShell at the repository root (`D:\nepachat\nepachat`), run `firebase login` once if needed, then `firebase deploy --only hosting --project nepachat-dcc71`. The deploy hook builds `web` and publishes `web/dist`. Ensure `VITE_API_URL` and the `VITE_FIREBASE_*` values are set in `web/.env.production` or the build environment. Never put backend secrets such as mail API keys in frontend variables.
-
-Do not deploy Firestore until its rules have been reviewed: the current `web/firestore.rules` template grants public read/write access until its expiration date. The root Firebase configuration intentionally excludes Firestore and Functions.
+Production account registration needs a verified Resend sender and the corresponding environment variables; the API health endpoint alone does not prove email delivery is configured.
 
 ## Deploy to Render and Cloudflare Pages
 1. Push this project to a GitHub repository. Keep `.env` out of Git; `.gitignore` excludes it.
 2. Create a MongoDB Atlas database and allow network access from Render. Copy its connection string.
 3. In Render, create a **Blueprint** from the repository. `render.yaml` configures the Docker API service and health check. Set `MONGO_URL` and `CORS_ORIGIN`. For email, set `RESEND_API_KEY` and `RESEND_FROM` after verifying a sender domain with Resend; alternatively, use Gmail API OAuth credentials below. `JWT_SECRET` is generated by Render; `OTP_DEV_MODE` stays off in production.
 4. Wait for the Render service health check, then confirm its URL, normally `https://nepachat-api.onrender.com`. Update `VITE_API_URL` in `web/.env.production` if Render assigned another URL.
-5. From `web`, run `npm install`, `npx wrangler login`, and `npm run deploy`. This uploads the built static app to Cloudflare Pages project `nepachat`.
+5. From `web`, run `npm install`, `npx wrangler login`, and `npm run deploy`. This builds the static app and uploads `dist` to Cloudflare Pages project `nepachat`. In Cloudflare Pages project settings, set `VITE_API_URL` to the API origin if it differs from the value in `web/.env.production`; no Firebase configuration is required.
 
 The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. In production, set `OWNER_EMAIL=aftabaha12@gmail.com` in Render to promote the matching account to admin. Public sign-up remains available and requires email verification; admins can also create verified accounts from **Create account** and permanently delete accounts from **View users**. Deleting an account removes its chats and messages for every participant, friendships, activity posts, calls, location shares, device sessions, and account-owned media. The signed-in admin cannot delete their own account, the configured owner account cannot be deleted, and the last admin is protected.
 

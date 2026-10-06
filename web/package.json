@@ -9,8 +9,6 @@
     "deploy": "vite build && wrangler pages deploy dist --project-name nepachat"
   },
   "dependencies": {
-    "@dataconnect/generated": "file:src/dataconnect-generated",
-    "firebase": "^12.19.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "socket.io-client": "^4.7.5"
@@ -18,9 +16,6 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "vite": "^5.4.0",
-    "wrangler": "^4"
-  },
-  "overrides": {
-    "@grpc/grpc-js": "^1.14.5"
+    "wrangler": "^4.148.0"
   }
 }
