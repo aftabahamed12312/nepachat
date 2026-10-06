@@ -281,7 +281,7 @@ function LinkedDevices({ token, onClose, onAlert }) {
   );
 }
 
-function CallPanel({ callState, localStream, remoteStream, peerConnection, audioEnabled, videoEnabled, layout, onLayoutChange, onToggleAudio, onToggleVideo, onSwitchCamera, onAccept, onDecline, onHangup }) {
+function CallPanel({ callState, localStream, remoteStream, peerConnection, audioEnabled, videoEnabled, noiseCancellation, cameraSwitching, layout, onLayoutChange, onToggleAudio, onToggleVideo, onToggleNoiseCancellation, onSwitchCamera, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
   const panelRef = useRef();
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -404,7 +404,10 @@ function CallPanel({ callState, localStream, remoteStream, peerConnection, audio
         <footer>
           {layout === 'minimized' ? <>
             <span className="call-mini-status">{label}</span>
-            {!callState.incoming && <button className={'call-control' + (audioEnabled ? '' : ' disabled')} title={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} aria-label={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} onClick={onToggleAudio}>{audioEnabled ? 'Mic on' : 'Mic off'}</button>}
+            {!callState.incoming && <>
+              <button className={'call-control' + (audioEnabled ? '' : ' disabled')} title={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} aria-label={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} onClick={onToggleAudio}>{audioEnabled ? 'Mic on' : 'Mic off'}</button>
+              <button className={'call-control' + (noiseCancellation ? '' : ' disabled')} aria-pressed={noiseCancellation} title={noiseCancellation ? 'Turn noise cancellation off' : 'Turn noise cancellation on'} onClick={onToggleNoiseCancellation}>Noise cancel {noiseCancellation ? 'on' : 'off'}</button>
+            </>}
             {callState.incoming ? <button className="btn" onClick={onAccept}>Answer</button> : <button className="btn danger" onClick={onHangup}>End</button>}
           </> : callState.incoming ? <>
             <button className="btn" onClick={onAccept}>Answer</button>
@@ -412,9 +415,10 @@ function CallPanel({ callState, localStream, remoteStream, peerConnection, audio
           </> : <>
             <span className={'call-network-quality quality-' + networkQuality.toLowerCase()} role="status">Network: {networkQuality}</span>
             <button className={'call-control' + (audioEnabled ? '' : ' disabled')} title={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} aria-label={audioEnabled ? 'Mute microphone' : 'Unmute microphone'} onClick={onToggleAudio}>{audioEnabled ? 'Mic on' : 'Mic off'}</button>
+            <button className={'call-control' + (noiseCancellation ? '' : ' disabled')} aria-pressed={noiseCancellation} title={noiseCancellation ? 'Turn noise cancellation off' : 'Turn noise cancellation on'} onClick={onToggleNoiseCancellation}>Noise cancel {noiseCancellation ? 'on' : 'off'}</button>
             {callState.kind === 'video' && <>
               <button className={'call-control' + (videoEnabled ? '' : ' disabled')} title={videoEnabled ? 'Turn camera off' : 'Turn camera on'} aria-label={videoEnabled ? 'Turn camera off' : 'Turn camera on'} onClick={onToggleVideo}>{videoEnabled ? 'Camera on' : 'Camera off'}</button>
-              <button className="call-control" title="Switch camera" aria-label="Switch camera" onClick={onSwitchCamera}>Flip camera</button>
+              <button className="call-control" title="Switch camera" aria-label="Switch camera" onClick={onSwitchCamera} disabled={cameraSwitching}>{cameraSwitching ? 'Switching…' : 'Flip camera'}</button>
             </>}
             <button className="btn danger" onClick={onHangup}>End call</button>
           </>}
@@ -746,7 +750,8 @@ export default function App() {
   const [notificationPromptOpen, setNotificationPromptOpen] = useState(false), [configLoaded, setConfigLoaded] = useState(false);
   const [alerts, setAlerts] = useState([]);
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null), [peerConnection, setPeerConnection] = useState(null);
-  const [audioEnabled, setAudioEnabled] = useState(true), [videoEnabled, setVideoEnabled] = useState(true);
+  const [audioEnabled, setAudioEnabled] = useState(true), [videoEnabled, setVideoEnabled] = useState(true), [noiseCancellation, setNoiseCancellation] = useState(true);
+  const [cameraSwitching, setCameraSwitching] = useState(false);
   const [cameraFacing, setCameraFacing] = useState('user');
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -984,7 +989,7 @@ export default function App() {
   const clearCall = () => {
     peerRef.current?.close(); peerRef.current = null;
     localStreamRef.current?.getTracks().forEach(track => track.stop()); localStreamRef.current = null;
-    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setPeerConnection(null); setCallState(null); setCallLayout('overlay'); setAudioEnabled(true); setVideoEnabled(true); setCameraFacing('user'); callRef.current = null;
+    pendingCandidatesRef.current = []; setLocalStream(null); setRemoteStream(null); setPeerConnection(null); setCallState(null); setCallLayout('overlay'); setAudioEnabled(true); setVideoEnabled(true); setNoiseCancellation(true); setCameraSwitching(false); setCameraFacing('user'); callRef.current = null;
   };
   const endCall = reason => {
     const current = callRef.current;
@@ -1032,18 +1037,77 @@ export default function App() {
     setVideoEnabled(enabled);
   };
 
+  const toggleNoiseCancellation = async () => {
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (!track || track.readyState !== 'live') {
+      setCallState(current => current ? { ...current, error: 'Microphone track is unavailable. End the call and try again.' } : current);
+      return;
+    }
+    const enabled = !noiseCancellation;
+    const supported = navigator.mediaDevices.getSupportedConstraints?.() || {};
+    const constraints = {};
+    if (supported.noiseSuppression) constraints.noiseSuppression = enabled;
+    if (supported.echoCancellation) constraints.echoCancellation = enabled;
+    if (supported.autoGainControl) constraints.autoGainControl = enabled;
+    if (!Object.keys(constraints).length) {
+      setCallState(current => current ? { ...current, error: 'Noise cancellation controls are not supported by this browser.' } : current);
+      return;
+    }
+    try {
+      await track.applyConstraints(constraints);
+      setNoiseCancellation(enabled);
+      setCallState(current => current ? { ...current, error: '' } : current);
+    } catch (error) {
+      setCallState(current => current ? {
+        ...current,
+        error: error.message || 'Unable to change microphone noise cancellation on this device.',
+      } : current);
+    }
+  };
+
   const switchCamera = async () => {
     const current = callRef.current;
     const stream = localStreamRef.current;
-    if (!current || current.kind !== 'video' || !stream) return;
+    if (!current || current.kind !== 'video' || !stream || cameraSwitching) return;
     let replacement;
+    setCameraSwitching(true);
     try {
-      replacement = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { exact: cameraFacing === 'user' ? 'environment' : 'user' } },
-      });
-      const nextTrack = replacement.getVideoTracks()[0];
+      const targetFacing = cameraFacing === 'user' ? 'environment' : 'user';
       const oldTrack = stream.getVideoTracks()[0];
+      if (!oldTrack || oldTrack.readyState !== 'live') throw new Error('Camera track is unavailable. End the call and try again.');
+      let targetDevice;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cameras = devices.filter(device => device.kind === 'videoinput');
+        const currentDeviceId = oldTrack.getSettings().deviceId;
+        const matchingCamera = cameras.find(device => {
+          if (!device.deviceId || device.deviceId === currentDeviceId) return false;
+          return targetFacing === 'environment'
+            ? /(back|rear|environment|world)/i.test(device.label)
+            : /(front|user|facetime)/i.test(device.label);
+        });
+        targetDevice = matchingCamera || cameras.find(device => device.deviceId && device.deviceId !== currentDeviceId);
+      } catch (error) {
+        console.warn('Unable to enumerate cameras; trying the requested facing mode:', error);
+      }
+      try {
+        replacement = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: targetDevice
+            ? { deviceId: { exact: targetDevice.deviceId } }
+            : { facingMode: { ideal: targetFacing } },
+        });
+      } catch (deviceError) {
+        replacement?.getTracks().forEach(track => track.stop());
+        replacement = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: { ideal: targetFacing } },
+        });
+        if (replacement.getVideoTracks()[0]?.getSettings().deviceId === oldTrack.getSettings().deviceId) {
+          throw new Error(deviceError.message || 'A different camera is not available on this device.');
+        }
+      }
+      const nextTrack = replacement.getVideoTracks()[0];
       const sender = peerRef.current?.getSenders().find(item => item.track?.kind === 'video');
       if (!nextTrack || !sender || !oldTrack) throw new Error('The other camera could not be selected.');
       nextTrack.enabled = videoEnabled;
@@ -1052,7 +1116,8 @@ export default function App() {
       localStreamRef.current = nextStream;
       oldTrack.stop();
       setLocalStream(nextStream);
-      setCameraFacing(cameraFacing === 'user' ? 'environment' : 'user');
+      const actualFacing = nextTrack.getSettings().facingMode;
+      setCameraFacing(actualFacing === 'user' || actualFacing === 'environment' ? actualFacing : targetFacing);
       setCallState(value => value ? { ...value, error: '' } : value);
     } catch (error) {
       replacement?.getTracks().forEach(track => track.stop());
@@ -1062,6 +1127,8 @@ export default function App() {
           ? 'Allow camera access to switch cameras.'
           : error.message || 'Unable to switch camera on this device.',
       } : value);
+    } finally {
+      setCameraSwitching(false);
     }
   };
 
@@ -1069,7 +1136,11 @@ export default function App() {
     if (!active || !socketRef.current || callRef.current) return;
     try {
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
+      });
+      if (kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
       const current = { chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id, peerName: '@' + active.other.username, kind, status: 'calling' };
       const peer = new RTCPeerConnection({ iceServers });
       callRef.current = current; setCallState(current); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
@@ -1087,7 +1158,11 @@ export default function App() {
     if (!current?.incoming) return;
     try {
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
+      });
+      if (current.kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
       const peer = new RTCPeerConnection({ iceServers });
       const connecting = { ...current, incoming: false, status: 'connecting' };
       callRef.current = connecting; setCallState(connecting); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
@@ -1685,7 +1760,7 @@ export default function App() {
           {alerts.map(alert => <div key={alert.id} className={'alert-item alert-' + alert.kind}>{alert.message}</div>)}
         </div>
       )}
-      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} peerConnection={peerConnection} audioEnabled={audioEnabled} videoEnabled={videoEnabled} layout={callLayout} onLayoutChange={setCallLayout} onToggleAudio={toggleAudio} onToggleVideo={toggleVideo} onSwitchCamera={switchCamera} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
+      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} peerConnection={peerConnection} audioEnabled={audioEnabled} videoEnabled={videoEnabled} noiseCancellation={noiseCancellation} cameraSwitching={cameraSwitching} layout={callLayout} onLayoutChange={setCallLayout} onToggleAudio={toggleAudio} onToggleVideo={toggleVideo} onToggleNoiseCancellation={toggleNoiseCancellation} onSwitchCamera={switchCamera} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );
 }
