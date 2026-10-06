@@ -19,13 +19,13 @@ const {
   SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
   TURN_KEY_ID, TURN_API_TOKEN, TURN_URL, TURN_USERNAME, TURN_CREDENTIAL, OWNER_EMAIL = '', OTP_DEV_MODE = 'false',
-  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME,
+  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, UPLOADS_DIR,
   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT = 'mailto:admin@nepachat.pages.dev',
 } = process.env;
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -38,13 +38,14 @@ await locationShares.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 await locationShares.createIndex({ chatId: 1, ownerId: 1 });
 await pushSubs.createIndex({ endpoint: 1 }, { unique: true });
 await pushSubs.createIndex({ userId: 1 });
+await activityPosts.createIndex({ createdAt: -1, _id: -1 });
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
 app.use(express.json({ limit: '50kb' }));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') } });
-const localUploadsDir = path.resolve(process.cwd(), 'uploads');
+const localUploadsDir = path.resolve(UPLOADS_DIR || path.join(process.cwd(), 'uploads'));
 await fs.mkdir(localUploadsDir, { recursive: true });
 const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
 const mediaEnabled = true;
@@ -286,6 +287,29 @@ app.post('/api/admin/users', auth, admin, wrap(async (req, res) => {
   }
 }));
 
+app.get('/api/admin/users', auth, admin, wrap(async (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 100);
+  const offsetValue = Number.parseInt(String(req.query.offset || '0'), 10);
+  const offset = Number.isSafeInteger(offsetValue) && offsetValue > 0 ? offsetValue : 0;
+  const filter = query
+    ? { $or: ['username', 'email'].map(field => ({ [field]: { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } })) }
+    : {};
+  const projection = { username: 1, email: 1, role: 1, created: 1, verified: 1 };
+  const [list, total] = await Promise.all([
+    users.find(filter, { projection }).sort({ created: -1, _id: -1 }).skip(offset).limit(50).toArray(),
+    users.countDocuments(filter),
+  ]);
+  res.json({
+    users: list.map(user => ({
+      id: String(user._id), username: user.username, email: user.email,
+      role: user.role || 'user', created: user.created || null, verified: Boolean(user.verified),
+    })),
+    total,
+    offset,
+    limit: 50,
+  });
+}));
+
 app.get('/api/me', auth, wrap(async (req, res) => {
   const u = await users.findOne({ _id: oid(req.uid) });
   u ? res.json(accountView(u)) : res.status(401).json({ error: 'Unknown user' });
@@ -394,31 +418,131 @@ const mediaTypeFromName = name => {
       return '';
   }
 };
+const extensionForMediaType = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+};
+const fileMatchesMediaType = (buffer, type) => {
+  if (!Buffer.isBuffer(buffer)) return false;
+  switch (type) {
+    case 'image/jpeg':
+      return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case 'image/png':
+      return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    case 'image/webp':
+      return buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+    case 'image/gif':
+      return buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6));
+    case 'video/mp4':
+      return buffer.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp';
+    case 'video/webm':
+      return buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+    default:
+      return false;
+  }
+};
+const storeMedia = async (prefix, body, type) => {
+  const key = `${prefix}/${randomUUID()}${extensionForMediaType[type]}`;
+  if (r2Configured) {
+    await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: body, ContentType: type }));
+  } else {
+    const targetDir = path.join(localUploadsDir, ...prefix.split('/'));
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, path.basename(key)), body);
+  }
+  return key;
+};
 
 app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
-  const fileName = decodeURIComponent(String(req.get('x-file-name') || 'attachment')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  let fileName;
+  try {
+    fileName = decodeURIComponent(String(req.get('x-file-name') || 'attachment')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  } catch {
+    return res.status(400).json({ error: 'Invalid file name' });
+  }
   const declaredType = String(req.get('x-file-type') || req.get('content-type') || '').split(';')[0].toLowerCase();
   const type = mediaTypes.has(declaredType) ? declaredType : mediaTypeFromName(fileName) || declaredType;
-  if (!mediaTypes.has(type) || !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > mediaLimit) {
+  if (!mediaTypes.has(type) || !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > mediaLimit || !fileMatchesMediaType(req.body, type)) {
     return res.status(400).json({ error: 'Upload a supported image or video under 25 MB' });
   }
   const name = fileName || 'attachment';
-  const extension = path.extname(name) || (type.startsWith('image/') ? '.png' : '.mp4');
-  let key = `${req.params.id}/${req.uid}/${randomUUID()}${extension}`;
-
-  if (r2Configured) {
-    await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: req.body, ContentType: type }));
-  } else {
-    const targetDir = path.join(localUploadsDir, req.params.id, req.uid);
-    await fs.mkdir(targetDir, { recursive: true });
-    const targetPath = path.join(targetDir, `${randomUUID()}${extension}`);
-    await fs.writeFile(targetPath, req.body);
-    key = path.posix.join(req.params.id, req.uid, path.basename(targetPath));
-  }
-
+  const key = await storeMedia(`${req.params.id}/${req.uid}`, req.body, type);
   res.status(201).json({ attachment: { key, type, name: name || 'attachment', size: req.body.length } });
+}));
+
+app.put('/api/activity/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
+  let fileName;
+  try {
+    fileName = decodeURIComponent(String(req.get('x-file-name') || 'activity')).replace(/[\r\n\\/]/g, '').slice(0, 120);
+  } catch {
+    return res.status(400).json({ error: 'Invalid file name' });
+  }
+  const declaredType = String(req.get('x-file-type') || req.get('content-type') || '').split(';')[0].toLowerCase();
+  const type = mediaTypes.has(declaredType) ? declaredType : mediaTypeFromName(fileName) || declaredType;
+  if (!mediaTypes.has(type) || !Buffer.isBuffer(req.body) || !req.body.length || req.body.length > mediaLimit || !fileMatchesMediaType(req.body, type)) {
+    return res.status(400).json({ error: 'Upload a supported image or video under 25 MB' });
+  }
+  const key = await storeMedia(`activity/${req.uid}`, req.body, type);
+  res.status(201).json({ attachment: { key, type, name: fileName || 'activity', size: req.body.length } });
+}));
+
+async function activityPostView(post, req) {
+  const author = await users.findOne({ _id: oid(post.authorId) });
+  const attachments = await Promise.all((post.attachments || []).map(async attachment => ({
+    ...attachment,
+    url: r2Configured
+      ? await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 })
+      : attachmentUrlFromKey(req, attachment.key),
+  })));
+  return {
+    id: String(post._id),
+    text: post.text,
+    createdAt: post.createdAt,
+    author: author ? pub(author) : { id: post.authorId, username: 'unknown', email: '' },
+    attachments,
+  };
+}
+
+app.get('/api/activity/posts', auth, wrap(async (req, res) => {
+  const list = await activityPosts.find().sort({ createdAt: -1, _id: -1 }).limit(50).toArray();
+  res.json(await Promise.all(list.map(post => activityPostView(post, req))));
+}));
+
+app.post('/api/activity/posts', auth, wrap(async (req, res) => {
+  const text = String(req.body.text || '').trim().slice(0, 2000);
+  const requested = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+  if ((!text && !requested.length) || requested.length > 5) return res.status(400).json({ error: 'Add a caption or at least one photo/video (up to 5 files)' });
+  const attachments = [];
+  for (const item of requested) {
+    const validKey = typeof item.key === 'string' && new RegExp(`^activity/${req.uid}/[a-f0-9-]{36}\\.(?:jpg|png|webp|gif|mp4|webm)$`).test(item.key);
+    if (!validKey || !mediaTypes.has(item.type) || path.posix.extname(item.key) !== extensionForMediaType[item.type] || !Number.isInteger(item.size) || item.size < 1 || item.size > mediaLimit) {
+      return res.status(400).json({ error: 'Invalid activity attachment' });
+    }
+    if (r2Configured) {
+      const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: item.key }));
+      if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
+    } else {
+      const localFile = path.resolve(localUploadsDir, item.key);
+      if (!localFile.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(400).json({ error: 'Invalid activity attachment' });
+      try {
+        await fs.access(localFile);
+      } catch {
+        return res.status(400).json({ error: 'Attachment file was not found' });
+      }
+    }
+    attachments.push({ key: item.key, type: item.type, name: String(item.name || 'activity').slice(0, 120), size: item.size });
+  }
+  const post = { authorId: req.uid, text, attachments, createdAt: Date.now() };
+  const result = await activityPosts.insertOne(post);
+  const view = await activityPostView({ ...post, _id: result.insertedId }, req);
+  io.emit('activity:post', view);
+  res.status(201).json(view);
 }));
 
 async function locationView(share) {

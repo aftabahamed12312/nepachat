@@ -14,7 +14,8 @@ services:
       SEED_EMAIL: nepa-demo@example.test
       SEED_PASSWORD: local-demo-only-2026
       OTP_DEV_MODE: "true"
-    volumes: ["./server/src:/app/src"]
+      UPLOADS_DIR: /app/uploads
+    volumes: ["./server/src:/app/src", "chat-uploads:/app/uploads"]
     ports: ["4000:4000"]
     depends_on: [mongo]
   web:
@@ -26,3 +27,4 @@ services:
     depends_on: [server]
 volumes:
   mongo-data:
+  chat-uploads:

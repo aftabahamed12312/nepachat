@@ -2,6 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 
 const API = import.meta.env.VITE_API_URL || '';
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
+const attachmentKey = file => `${file.name}-${file.size}-${file.lastModified}`;
+const mediaTypeFromFile = file => {
+  const lowerName = String(file.name || '').toLowerCase();
+  if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm'].includes(file.type)) return file.type;
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
+  if (lowerName.endsWith('.png')) return 'image/png';
+  if (lowerName.endsWith('.webp')) return 'image/webp';
+  if (lowerName.endsWith('.gif')) return 'image/gif';
+  if (lowerName.endsWith('.mp4')) return 'video/mp4';
+  if (lowerName.endsWith('.webm')) return 'video/webm';
+  return '';
+};
+const isSupportedAttachment = file => {
+  if (typeof File === 'undefined' || !(file instanceof File)) return false;
+  if (file.size <= 0 || file.size > MAX_ATTACH_BYTES) return false;
+  return Boolean(mediaTypeFromFile(file));
+};
 const call = async (path, token, method = 'GET', body) => {
   const r = await fetch(API + '/api' + path, {
     method,
@@ -184,6 +202,81 @@ function AdminCreateUser({ token, onClose }) {
   );
 }
 
+function AdminUsers({ token, onClose }) {
+  const [query, setQuery] = useState('');
+  const [users, setUsers] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let current = true;
+    const timeout = window.setTimeout(() => {
+      setLoading(true); setError(''); setSelected(null);
+      call(`/admin/users?q=${encodeURIComponent(query)}`, token).then(result => {
+        if (!current) return;
+        setUsers(result.users); setTotal(result.total);
+      }).catch(requestError => {
+        if (current) setError(requestError.message);
+      }).finally(() => {
+        if (current) setLoading(false);
+      });
+    }, 200);
+    return () => { current = false; window.clearTimeout(timeout); };
+  }, [query, token]);
+  const loadMore = async () => {
+    setLoadingMore(true); setError('');
+    try {
+      const result = await call(`/admin/users?q=${encodeURIComponent(query)}&offset=${users.length}`, token);
+      setUsers(current => [...current, ...result.users]); setTotal(result.total);
+    } catch (requestError) { setError(requestError.message); }
+    finally { setLoadingMore(false); }
+  };
+  const created = selected?.created ? new Date(selected.created).toLocaleString() : 'Not available';
+  return (
+    <div className="modal" onClick={onClose}>
+      <section className="sheet admin-users-sheet" onClick={event => event.stopPropagation()}>
+        <div className="admin-users-heading">
+          {selected && <button className="admin-profile-back" onClick={() => setSelected(null)}>← Users</button>}
+          <h3>{selected ? 'User profile' : 'Users'}</h3>
+        </div>
+        {selected ? (
+          <div className="admin-user-profile">
+            <Avatar name={selected.username} />
+            <h4>@{selected.username}</h4>
+            <dl>
+              <div><dt>Email</dt><dd>{selected.email}</dd></div>
+              <div><dt>Account type</dt><dd>{selected.role}</dd></div>
+              <div><dt>Email verified</dt><dd>{selected.verified ? 'Yes' : 'No'}</dd></div>
+              <div><dt>Account created</dt><dd>{created}</dd></div>
+            </dl>
+          </div>
+        ) : <>
+          <input className="search admin-user-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by username or email" />
+          {error && <p className="err">{error}</p>}
+          <div className="admin-user-list">
+            {!loading && !error && users.map(user => (
+              <button key={user.id} className="row admin-user-row" onClick={() => setSelected(user)}>
+                <Avatar name={user.username} />
+                <div className="grow"><b>@{user.username}</b><small>{user.email}</small></div>
+                <span className="admin-user-role">{user.role}</span>
+              </button>
+            ))}
+            {!loading && !error && !users.length && <p className="muted pad">No users found.</p>}
+            {loading && <p className="muted pad">Loading users…</p>}
+          </div>
+          {!loading && users.length < total && <button className="btn ghost" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load more users'}
+          </button>}
+          {!loading && !error && <small className="admin-user-count">Showing {users.length} of {total}</small>}
+        </>}
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </section>
+    </div>
+  );
+}
+
 function CallHistory({ token, onClose }) {
   const [history, setHistory] = useState([]), [error, setError] = useState('');
   useEffect(() => { call('/calls/history', token).then(setHistory).catch(requestError => setError(requestError.message)); }, [token]);
@@ -233,19 +326,28 @@ function LocationShareDialog({ onStart, onClose }) {
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, mediaEnabled: false });
-  const [adminModal, setAdminModal] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false);
+  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
+  const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
+  const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
+  const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
+  const [activityUploadProgress, setActivityUploadProgress] = useState({});
+  const [activityComposerOpen, setActivityComposerOpen] = useState(false);
   const [text, setText] = useState(''), [replyingTo, setReplyingTo] = useState(null), [modal, setModal] = useState(false), [filter, setFilter] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]), [composeError, setComposeError] = useState('');
+  const [uploadState, setUploadState] = useState({});
+  const [isSending, setIsSending] = useState(false);
   const [locationShares, setLocationShares] = useState([]), [locationError, setLocationError] = useState('');
   const [pushEnabled, setPushEnabled] = useState(false), [pushError, setPushError] = useState('');
   const [alerts, setAlerts] = useState([]);
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null);
   const [callLayout, setCallLayout] = useState('overlay');
-  const endRef = useRef(), fileInputRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   activeRef.current = active;
   callRef.current = callState;
   const token = auth?.token, me = auth?.user;
+  const sendingRef = useRef(false);
   const stopLocationTracking = () => {
     if (locationWatchRef.current !== null && navigator.geolocation) navigator.geolocation.clearWatch(locationWatchRef.current);
     if (locationTimerRef.current !== null) window.clearTimeout(locationTimerRef.current);
@@ -267,6 +369,22 @@ export default function App() {
     const next = { id: `${Date.now()}-${Math.random()}`, message, kind };
     setAlerts(current => [...current, next]);
     window.setTimeout(() => setAlerts(current => current.filter(item => item.id !== next.id)), 4000);
+  };
+  const showSystemNotification = (title, options = {}) => {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const notification = new Notification(title, {
+      body: options.body || '',
+      icon: options.icon || '/icon.svg',
+      tag: options.tag || undefined,
+      requireInteraction: Boolean(options.requireInteraction),
+    });
+    if (options.onClick) {
+      notification.onclick = () => {
+        window.focus();
+        options.onClick();
+        notification.close();
+      };
+    }
   };
   const enableNotifications = async () => {
     setPushError('');
@@ -312,27 +430,49 @@ export default function App() {
     setLocationShares(current => current.filter(item => item.id !== share.id));
     await call(`/chats/${share.chatId}/location-shares/${share.id}`, token, 'DELETE').catch(() => {});
   };
-  const uploadAttachment = async (file, chatId) => {
+  const uploadAttachment = async (file, chatId, onProgress) => {
     if (!publicConfig.mediaEnabled) throw new Error('Chat media storage is not configured');
-    if (file.size > 25 * 1024 * 1024) throw new Error('Each image or video must be under 25 MB');
-    const fileType = file.type || (() => {
-      const lowerName = String(file.name || '').toLowerCase();
-      if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
-      if (lowerName.endsWith('.png')) return 'image/png';
-      if (lowerName.endsWith('.webp')) return 'image/webp';
-      if (lowerName.endsWith('.gif')) return 'image/gif';
-      if (lowerName.endsWith('.mp4')) return 'video/mp4';
-      if (lowerName.endsWith('.webm')) return 'video/webm';
-      return 'application/octet-stream';
-    })();
-    const response = await fetch(`${API}/api/chats/${chatId}/uploads`, {
-      method: 'PUT',
-      headers: { Authorization: 'Bearer ' + token, 'Content-Type': fileType, 'X-File-Type': fileType, 'X-File-Name': encodeURIComponent(file.name) },
-      body: file,
+    if (!isSupportedAttachment(file)) throw new Error('Only image and video files under 25 MB are supported');
+    const fileType = mediaTypeFromFile(file);
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open('PUT', `${API}${chatId ? `/api/chats/${chatId}/uploads` : '/api/activity/uploads'}`);
+      request.timeout = 120000;
+      request.setRequestHeader('Authorization', 'Bearer ' + token);
+      request.setRequestHeader('Content-Type', fileType);
+      request.setRequestHeader('X-File-Type', fileType);
+      request.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'attachment'));
+      request.upload.onprogress = event => {
+        if (event.lengthComputable) {
+          const progress = Math.round(event.loaded / event.total * 100);
+          if (onProgress) onProgress(progress);
+          else setUploadState(current => ({
+            ...current,
+            [attachmentKey(file)]: { ...current[attachmentKey(file)], status: 'uploading', progress },
+          }));
+        }
+      };
+      request.onerror = () => reject(new Error('Upload failed. Check your connection and try again.'));
+      request.onabort = () => reject(new Error('Upload was cancelled.'));
+      request.ontimeout = () => reject(new Error('Upload timed out. Check your connection and try again.'));
+      request.onload = () => {
+        let data = {};
+        try { data = JSON.parse(request.responseText || '{}'); } catch { /* handled as a failed response below */ }
+        if (request.status < 200 || request.status >= 300) {
+          const message = request.status === 404
+            ? 'The API server is missing the upload endpoint. Redeploy the latest server code, then try again.'
+            : data.error || `Upload failed (${request.status || 'network error'})`;
+          reject(new Error(message));
+          return;
+        }
+        if (!data.attachment) {
+          reject(new Error('Upload completed without an attachment response.'));
+          return;
+        }
+        resolve(data.attachment);
+      };
+      request.send(file);
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || 'Upload failed');
-    return data.attachment;
   };
   const enablePush = async () => {
     await enableNotifications();
@@ -428,6 +568,7 @@ export default function App() {
       setMessages(list => list.map(message => message.id === messageId && rank[status] > rank[message.status || 'sent'] ? { ...message, status } : message));
     });
     s.on('location:update', share => setLocationShares(current => [...current.filter(item => item.id !== share.id), share]));
+    s.on('activity:post', post => setActivityPosts(current => [post, ...current.filter(item => item.id !== post.id)].slice(0, 50)));
     s.on('location:stopped', ({ shareId }) => setLocationShares(current => current.filter(item => item.id !== shareId)));
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
@@ -435,6 +576,12 @@ export default function App() {
       const next = { ...incoming, peerUserId: incoming.from.id, peerName: '@' + incoming.from.username, incoming: true, status: 'incoming' };
       callRef.current = next; setCallState(next); setCallLayout('overlay');
       addAlert(`Incoming ${incoming.kind} call from @${incoming.from.username}`, 'info');
+      showSystemNotification(`Incoming ${incoming.kind} call`, {
+        body: `@${incoming.from.username} is calling you`,
+        tag: `call-${incoming.callId}`,
+        requireInteraction: true,
+        onClick: () => setCallLayout('overlay'),
+      });
     });
     s.on('call:signal', async ({ callId, signal }) => {
       if (signal.type === 'candidate' && !callRef.current) {
@@ -458,6 +605,18 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
+    if (activeView !== 'activity' || !token) return;
+    let current = true;
+    setActivityLoading(true);
+    setActivityError('');
+    call('/activity/posts', token)
+      .then(posts => { if (current) setActivityPosts(posts); })
+      .catch(error => { if (current) setActivityError(error.message); })
+      .finally(() => { if (current) setActivityLoading(false); });
+    return () => { current = false; };
+  }, [activeView, token]);
+
+  useEffect(() => {
     if (!active) return;
     setMessages([]);
     call(`/chats/${active.id}/messages`, token).then(list => {
@@ -473,27 +632,150 @@ export default function App() {
   useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
 
   const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActive(c); };
+  const selectView = view => {
+    setActiveView(view);
+    setActive(null);
+    setIsDraggingFiles(false);
+  };
+  const selectActivityFiles = fileList => {
+    const incoming = Array.from(fileList || []);
+    const chosen = incoming.filter(isSupportedAttachment).slice(0, 5 - activityFiles.length);
+    if (!publicConfig.mediaEnabled) {
+      setActivityError('Media storage is not configured.');
+      return;
+    }
+    if (!chosen.length && incoming.length) {
+      setActivityError('Choose image or video files under 25 MB (up to 5 per post).');
+      return;
+    }
+    setActivityError('');
+    setActivityFiles(current => [...current, ...chosen]);
+  };
+  const publishActivity = async () => {
+    if (postingActivity) return;
+    const text = activityText.trim();
+    const files = activityFiles.slice();
+    if ((!text && !files.length) || text.length > 2000) {
+      setActivityError(text.length > 2000 ? 'Post text must be under 2,000 characters.' : 'Write something or add a photo/video.');
+      return;
+    }
+    setPostingActivity(true);
+    setActivityError('');
+    try {
+      const attachments = await Promise.all(files.map(async file => {
+        const key = attachmentKey(file);
+        setActivityUploadProgress(current => ({ ...current, [key]: 0 }));
+        const attachment = await uploadAttachment(file, null, progress => setActivityUploadProgress(current => ({ ...current, [key]: progress })));
+        setActivityUploadProgress(current => ({ ...current, [key]: 100 }));
+        return attachment;
+      }));
+      const post = await call('/activity/posts', token, 'POST', { text, attachments });
+      setActivityPosts(current => [post, ...current.filter(item => item.id !== post.id)].slice(0, 50));
+      setActivityText('');
+      setActivityFiles([]);
+      setActivityUploadProgress({});
+      setActivityComposerOpen(false);
+    } catch (error) {
+      setActivityError(error.message || 'Unable to publish this post.');
+    } finally {
+      setPostingActivity(false);
+    }
+  };
+  const handleFilesSelected = fileList => {
+    if (sendingRef.current) {
+      setComposeError('Wait for the current message to finish sending before adding files.');
+      return;
+    }
+    if (!publicConfig.mediaEnabled) {
+      setComposeError('Chat media storage is not configured.');
+      return;
+    }
+    const incoming = Array.from(fileList || []);
+    const chosen = [];
+    const seen = new Set(attachedFiles.map(attachmentKey));
+    let rejected = 0;
+    for (const file of incoming) {
+      if (!isSupportedAttachment(file)) { rejected++; continue; }
+      const key = attachmentKey(file);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chosen.push(file);
+      if (chosen.length + attachedFiles.length >= 5) break;
+    }
+    if (!chosen.length) {
+      setComposeError(rejected ? 'Choose image or video files under 25 MB.' : 'You can attach up to 5 files to a message.');
+      return;
+    }
+    setComposeError(rejected ? 'Some files were skipped. Choose image or video files under 25 MB.' : '');
+    setAttachedFiles(current => [...current, ...chosen]);
+    setUploadState(current => {
+      const next = { ...current };
+      for (const file of chosen) next[attachmentKey(file)] = { status: 'queued' };
+      return next;
+    });
+  };
+  const handleFileDragEnter = event => {
+    if (Array.from(event.dataTransfer.types).includes('Files')) {
+      event.preventDefault();
+      setIsDraggingFiles(true);
+    }
+  };
+  const handleFileDrop = event => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    setIsDraggingFiles(false);
+    if (activeView === 'activity') selectActivityFiles(event.dataTransfer.files);
+    else handleFilesSelected(event.dataTransfer.files);
+  };
   const send = async () => {
     const t = text.trim(), files = attachedFiles.slice(), chat = active;
-    if ((!t && !files.length) || !chat) return;
+    if ((!t && !files.length) || !chat || sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
     const payload = { text: t, attachments: [], replyTo: replyingTo?.id || null };
-    setText(''); setAttachedFiles([]); setReplyingTo(null); setComposeError('');
+    setText(''); setReplyingTo(null); setComposeError('');
     try {
-      const attachments = await Promise.all(files.map(file => uploadAttachment(file, chat.id)));
-      payload.attachments = attachments;
+      const results = await Promise.allSettled(files.map(async file => {
+        const key = attachmentKey(file);
+        const cached = uploadState[key];
+        if (cached?.status === 'done' && cached.attachment) return cached.attachment;
+        setUploadState(current => ({ ...current, [key]: { status: 'uploading', progress: 0 } }));
+        try {
+          const attachment = await uploadAttachment(file, chat.id);
+          setUploadState(current => ({ ...current, [key]: { status: 'done', progress: 100, attachment } }));
+          return attachment;
+        } catch (error) {
+          setUploadState(current => ({ ...current, [key]: { status: 'error', message: error.message } }));
+          throw error;
+        }
+      }));
+      const failedUpload = results.find(result => result.status === 'rejected');
+      if (failedUpload) throw failedUpload.reason;
+      payload.attachments = results.map(result => result.value);
       await call(`/chats/${chat.id}/messages`, token, 'POST', payload);
-    } catch (error) { setText(t); setAttachedFiles(files); setReplyingTo(replyingTo); setComposeError(error.message); }
+      setAttachedFiles([]);
+      setUploadState({});
+    } catch (error) {
+      setText(t);
+      setAttachedFiles(files);
+      setReplyingTo(replyingTo);
+      setComposeError(error.message);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
   };
 
   if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} />;
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
-    <div className={'app' + (active ? ' open' : '')}>
+    <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
         <small>@{me.username}</small>
+        {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
         <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
         {publicConfig.vapidPublicKey && <button className={'hbtn' + (pushEnabled ? ' push-on' : '')} title={pushEnabled ? 'Call notifications enabled' : 'Enable call notifications'} aria-label="Enable call notifications" onClick={enablePush}>{pushEnabled ? '●' : '♢'}</button>}
@@ -501,19 +783,47 @@ export default function App() {
         <button className="hbtn" title="Sign out" onClick={logout}>⎋</button>
       </header>
       <aside className="side">
-        <input className="search" placeholder="Search chats" value={filter} onChange={e => setFilter(e.target.value)} />
-        <div className="list">
-          {!shown.length && <p className="muted pad">No chats yet. Tap ＋ to start one.</p>}
-          {shown.map(c => (
-            <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => setActive(c)}>
-              <Avatar name={c.other.username} />
-              <div className="grow"><b>@{c.other.username}</b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
-              {c.ts > 0 && <em>{time(c.ts)}</em>}
-            </button>))}
-        </div>
+        <nav className="side-nav" aria-label="Main navigation">
+          <button className={activeView === 'chats' ? 'selected' : ''} onClick={() => selectView('chats')}>Chats</button>
+          <button className={activeView === 'activity' ? 'selected' : ''} onClick={() => selectView('activity')}>Activity</button>
+        </nav>
+        {activeView === 'chats' && <>
+          <input className="search" placeholder="Search chats" value={filter} onChange={e => setFilter(e.target.value)} />
+          <div className="list">
+            {!shown.length && <p className="muted pad">No chats yet. Tap ＋ to start one.</p>}
+            {shown.map(c => (
+              <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => { setActiveView('chats'); setActive(c); }}>
+                <Avatar name={c.other.username} />
+                <div className="grow"><b>@{c.other.username}</b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
+                {c.ts > 0 && <em>{time(c.ts)}</em>}
+              </button>))}
+          </div>
+        </>}
       </aside>
-      <main className="main">
-        {!active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
+      <main className={'main' + (isDraggingFiles ? ' drag-over' : '')}
+        onDragEnter={handleFileDragEnter}
+        onDragOver={event => { if (Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault(); }}
+        onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setIsDraggingFiles(false); }}
+        onDrop={handleFileDrop}>
+        {isDraggingFiles && <div className="drop-overlay" aria-hidden="true">{activeView === 'activity' ? 'Drop photos/videos to add to your post' : 'Drop images or videos to attach'}</div>}
+        {activeView === 'activity' ? <div className="activity-page">
+          <div className="activity-heading"><button className="activity-back" onClick={() => selectView('chats')}>← Chats</button><h2>Activity</h2><p>Share photos, videos, and updates with everyone on NepaChat.</p></div>
+          <button className="activity-start-post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>
+            <Avatar name={me.username} /><span>What's happening, @{me.username}?</span><b>＋</b>
+          </button>
+          <div className="activity-feed" aria-live="polite">
+            {activityLoading && !activityPosts.length && <p className="muted">Loading activity…</p>}
+            {!activityLoading && !activityError && !activityPosts.length && <div className="empty activity-empty"><div>✦</div><h3>No activity yet</h3><p>Share your first update with the community.</p></div>}
+            {activityPosts.map(post => <article className="activity-post" key={post.id}>
+              <header><Avatar name={post.author.username} /><div><b>@{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
+              {post.text && <p className="activity-post-text">{post.text}</p>}
+              {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment => attachment.type.startsWith('image/')
+                ? <a href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img src={attachment.url} alt={attachment.name} loading="lazy" /></a>
+                : <video key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}</div>}
+            </article>)}
+          </div>
+          <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>＋</button>
+        </div> : !active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
           <div className="chead">
             <button className="back" onClick={() => setActive(null)}>←</button>
             <Avatar name={active.other.username} big />
@@ -540,21 +850,58 @@ export default function App() {
             </div>)}
             <div ref={endRef} />
           </div>
-          {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => <span key={`${file.name}-${file.lastModified}`}>{file.name}<button aria-label={`Remove ${file.name}`} onClick={() => setAttachedFiles(current => current.filter((_, i) => i !== index))}>×</button></span>)}</div>}
+          {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => {
+            const key = attachmentKey(file);
+            const state = uploadState[key] || {};
+            const suffix = state.status === 'uploading' ? `Uploading ${state.progress || 0}%` : state.status === 'error' ? state.message || 'Upload failed' : state.status === 'done' ? 'Ready to send' : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+            return <span key={key} className={state.status === 'error' ? 'upload-error' : ''} aria-label={`${file.name}: ${suffix}`}>
+              <b>{file.name}</b><small>{suffix}</small>
+              {state.status === 'uploading' && <progress max="100" value={state.progress || 0} aria-label={`Uploading ${file.name}`} />}
+              <button disabled={isSending} aria-label={`Remove ${file.name}`} onClick={() => {
+                setAttachedFiles(current => current.filter((_, i) => i !== index));
+                setUploadState(current => { const next = { ...current }; delete next[key]; return next; });
+              }}>×</button>
+            </span>;
+          })}</div>}
           {replyingTo && <div className="reply-box"><div className="reply-meta">Replying to @{messages.find(item => item.id === replyingTo.id)?.from === me.id ? 'you' : active.other.username}</div><div className="reply-preview">{replyingTo.text || 'Shared media'}</div><button className="text-button" onClick={() => setReplyingTo(null)}>Cancel</button></div>}
           {composeError && <div className="inline-error">{composeError}</div>}
           <div className="comp">
-            <input ref={fileInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple onChange={event => { setAttachedFiles(current => [...current, ...Array.from(event.target.files || []).slice(0, 5 - current.length)]); event.target.value = ''; }} />
-            <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}>▧</button>
-            <textarea rows={1} value={text} placeholder={replyingTo ? 'Reply to the message…' : 'Type a message'} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
-            <button className="send" onClick={send}>➤</button>
+            <input ref={fileInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple disabled={isSending || attachedFiles.length >= 5} onChange={event => { handleFilesSelected(event.target.files); event.target.value = ''; }} />
+            <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || isSending || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}>▧</button>
+            <textarea rows={1} value={text} disabled={isSending} placeholder={replyingTo ? 'Reply to the message…' : 'Type a message'} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+            <button className="send" disabled={isSending || (!text.trim() && !attachedFiles.length)} onClick={send}>{isSending ? '…' : '➤'}</button>
           </div>
         </>}
       </main>
       {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
+      {adminUsersOpen && <AdminUsers token={token} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
       {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
+      {activityComposerOpen && <div className="modal activity-compose-modal" onClick={() => { if (!postingActivity) setActivityComposerOpen(false); }}>
+        <section className="sheet activity-compose-sheet" onClick={event => event.stopPropagation()}>
+          <div className="activity-compose-title"><h3>Create post</h3><button aria-label="Close post composer" disabled={postingActivity} onClick={() => setActivityComposerOpen(false)}>×</button></div>
+          <div className="activity-composer-head"><Avatar name={me.username} /><b>@{me.username}</b></div>
+          <textarea maxLength={2000} value={activityText} onChange={event => setActivityText(event.target.value)} placeholder="What's happening today?" aria-label="Write an activity post" />
+          {activityFiles.length > 0 && <div className="activity-file-list">{activityFiles.map(file => {
+            const key = attachmentKey(file);
+            const progress = activityUploadProgress[key];
+            return <div className="activity-file" key={key}>
+              <span>{file.name}</span>
+              {postingActivity && <progress max="100" value={progress || 0} aria-label={`Uploading ${file.name}`} />}
+              {!postingActivity && <button aria-label={`Remove ${file.name}`} onClick={() => setActivityFiles(current => current.filter(item => attachmentKey(item) !== key))}>×</button>}
+            </div>;
+          })}</div>}
+          {activityError && <p className="err">{activityError}</p>}
+          <div className="activity-composer-actions">
+            <input ref={activityInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onChange={event => { selectActivityFiles(event.target.files); event.target.value = ''; }} />
+            <button className="btn ghost" disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onClick={() => activityInputRef.current?.click()}>Add photos/videos</button>
+            <span className="grow" />
+            <small>{activityText.length}/2000</small>
+            <button className="btn" disabled={postingActivity || (!activityText.trim() && !activityFiles.length)} onClick={publishActivity}>{postingActivity ? 'Posting…' : 'Post'}</button>
+          </div>
+        </section>
+      </div>}
       {pushError && <div className="push-error" role="status">{pushError}<button aria-label="Dismiss" onClick={() => setPushError('')}>×</button></div>}
       {alerts.length > 0 && (
         <div className="alert-stack" aria-live="polite" aria-atomic="true">

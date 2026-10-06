@@ -2,7 +2,7 @@ import { Container, getContainer } from '@cloudflare/containers';
 
 export class NepaApi extends Container {
   defaultPort = 4000;
-  sleepAfter = '15m';
+  sleepAfter = 'never';
   constructor(ctx, env) {
     super(ctx, env);
     this.envVars = {

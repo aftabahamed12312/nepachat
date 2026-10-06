@@ -20,7 +20,9 @@ The local Docker setup seeds one verified demo account on first startup: `nepa_d
 
 The local demo accounts and fixed passwords are for development only. Do not configure those seed credentials on a public service. In production, set `OWNER_EMAIL=aftabaha12@gmail.com` in Render to enable owner-only account creation and disable public signup. The owner can create verified accounts from the **Create account** control in the app.
 
-Create a Cloudflare R2 bucket and S3 API token with object read/write permission for image/video attachments. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME` in Render. Uploads support images and MP4/WebM video up to 25 MB; downloads use signed URLs.
+Image and MP4/WebM video attachments up to 25 MB work without R2: the API stores them on its local filesystem. In Docker Compose, files are stored in the persistent `chat-uploads` volume mounted at `/app/uploads`, and the local Vite server proxies both uploads and downloads to the API. To choose a different directory, set `UPLOADS_DIR`.
+
+For a deployed service, local filesystem uploads are only durable if the host provides persistent storage. Render's default filesystem is ephemeral, so files can disappear on redeploy or instance replacement. To use local storage on Render, attach a persistent disk, set its mount path (for example `/var/data`) and set `UPLOADS_DIR=/var/data/uploads`. Alternatively, configure a Cloudflare R2 bucket and S3 API token with object read/write permission by setting `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME`; with R2 configured, uploads use the bucket and downloads use signed URLs.
 
 For incoming-call notifications, generate VAPID keys with `npx web-push generate-vapid-keys` and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in Render. Users must tap **Enable call notifications** and grant browser permission. For reliable calls across restrictive networks, configure Cloudflare TURN as described below.
 
