@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import {
+  CloseOutlined,
+  LoadingOutlined,
+  PictureOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SendOutlined,
+  TeamOutlined,
+  UserAddOutlined,
+  UsergroupAddOutlined,
+  VideoCameraOutlined,
+} from '@ant-design/icons';
 
 const API = import.meta.env.VITE_API_URL || '';
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
@@ -43,6 +55,7 @@ function ActivityMediaItem({ attachment, onRefresh }) {
   const [status, setStatus] = useState('loading');
   const [attempt, setAttempt] = useState(0);
   const refreshing = useRef(false);
+  const automaticRefreshAttempted = useRef(false);
   useEffect(() => {
     setUrl(attachment.url);
     setStatus('loading');
@@ -51,6 +64,11 @@ function ActivityMediaItem({ attachment, onRefresh }) {
   }, [attachment.url]);
   const retry = async automatic => {
     if (refreshing.current) return;
+    if (automatic && automaticRefreshAttempted.current) {
+      setStatus('error');
+      return;
+    }
+    if (automatic) automaticRefreshAttempted.current = true;
     refreshing.current = true;
     setStatus('refreshing');
     try {
@@ -79,12 +97,12 @@ function ActivityMediaItem({ attachment, onRefresh }) {
       {status === 'error'
         ? <div className="activity-media-error" role="status">
           <span>Media couldn’t be loaded. It may be temporarily unavailable.</span>
-          <button type="button" onClick={() => retry(false)}>Try again</button>
+          <button type="button" onClick={() => { automaticRefreshAttempted.current = false; retry(false); }}><ReloadOutlined /> Try again</button>
         </div>
         : attachment.type.startsWith('image/')
           ? <a href={url} target="_blank" rel="noreferrer"><img key={`${url}-${attempt}`} src={url} alt={attachment.name || 'Activity photo'} loading="lazy" onLoad={() => setStatus('ready')} onError={onMediaError} /></a>
           : <video key={`${url}-${attempt}`} src={url} controls playsInline preload="metadata" onLoadedData={() => setStatus('ready')} onError={onMediaError} />}
-      {status === 'refreshing' && <span className="activity-media-refreshing" role="status">Restoring media…</span>}
+      {status === 'refreshing' && <span className="activity-media-refreshing" role="status"><LoadingOutlined spin /> Restoring media…</span>}
     </div>
   );
 }
@@ -1559,22 +1577,22 @@ export default function App() {
         {activeView === 'activity' ? <div className="activity-page">
           <div className="activity-heading">
             <button className="activity-back" onClick={() => selectView('chats')}>← Chats</button>
-            <h2>Activity</h2>
+            <h2 className="activity-title"><span className="activity-title-icon"><TeamOutlined /></span>Activity</h2>
             <p>Share updates with your accepted friends.</p>
             <div className="friend-tabs">
-              <button className={friendPanel === 'discover' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'discover' ? '' : 'discover'); setFriendError(''); }}>Find people</button>
+              <button className={friendPanel === 'discover' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'discover' ? '' : 'discover'); setFriendError(''); }}><UserAddOutlined /> Find people</button>
               <button className={friendPanel === 'requests' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'requests' ? '' : 'requests'); setFriendError(''); }}>
-                Requests{friendData.incoming.length > 0 && <span>{friendData.incoming.length}</span>}
+                <UsergroupAddOutlined /> Requests{friendData.incoming.length > 0 && <span>{friendData.incoming.length}</span>}
               </button>
               <button className={friendPanel === 'friends' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'friends' ? '' : 'friends'); setFriendError(''); }}>
-                Friends{friendData.friends.length > 0 && <span>{friendData.friends.length}</span>}
+                <TeamOutlined /> Friends{friendData.friends.length > 0 && <span>{friendData.friends.length}</span>}
               </button>
             </div>
           </div>
           {friendPanel && <section className="friend-panel">
             <div className="friend-panel-heading">
               <h3>{friendPanel === 'discover' ? 'Find people' : friendPanel === 'requests' ? 'Friend requests' : 'Your friends'}</h3>
-              <button aria-label="Close friends panel" onClick={() => { setFriendPanel(''); setFriendError(''); }}>×</button>
+              <button aria-label="Close friends panel" onClick={() => { setFriendPanel(''); setFriendError(''); }}><CloseOutlined /></button>
             </div>
             {friendError && <p className="err">{friendError}</p>}
             {friendPanel === 'discover' && <>
@@ -1621,19 +1639,19 @@ export default function App() {
             </>}
           </section>}
           <button className="activity-start-post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>
-            <Avatar name={me.username} avatarPath={me.avatarPath} /><span>What's happening, {me.username}?</span><b>＋</b>
+            <Avatar name={me.username} avatarPath={me.avatarPath} /><span>What's happening, {me.username}?</span><b><PlusOutlined /></b>
           </button>
           <div className="activity-feed" aria-live="polite">
             {activityLoading && !activityPosts.length && <p className="muted">Loading activity…</p>}
-            {!activityLoading && !activityError && !activityPosts.length && <div className="empty activity-empty"><div>✦</div><h3>No activity yet</h3><p>Share your first update with the community.</p></div>}
-            {activityPosts.map(post => <article className="activity-post" key={post.id}>
+            {!activityLoading && !activityError && !activityPosts.length && <div className="empty activity-empty"><div><PictureOutlined /></div><h3>No activity yet</h3><p>Share your first update with the community.</p></div>}
+            {activityPosts.map((post, index) => <article className="activity-post" style={{ '--post-index': index }} key={post.id}>
               <header><Avatar name={post.author.username} avatarPath={post.author.avatarPath} /><div><b>{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
               {post.text && <p className="activity-post-text">{post.text}</p>}
               {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment =>
                 <ActivityMediaItem key={attachment.key} attachment={attachment} onRefresh={() => refreshActivityAttachment(post.id, attachment.key)} />)}</div>}
             </article>)}
           </div>
-          <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}>＋</button>
+          <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}><PlusOutlined /></button>
         </div> : !active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
           <div className="chead">
             <button className="back" onClick={() => setActive(null)}>←</button>
@@ -1702,7 +1720,7 @@ export default function App() {
       {profileOpen && <ProfileSettings me={me} token={token} onClose={() => setProfileOpen(false)} onUpdated={onProfileUpdated} />}
       {activityComposerOpen && <div className="modal activity-compose-modal" onClick={() => { if (!postingActivity) setActivityComposerOpen(false); }}>
         <section className="sheet activity-compose-sheet" onClick={event => event.stopPropagation()}>
-          <div className="activity-compose-title"><h3>Create post</h3><button aria-label="Close post composer" disabled={postingActivity} onClick={() => setActivityComposerOpen(false)}>×</button></div>
+          <div className="activity-compose-title"><div><span className="activity-title-icon"><PictureOutlined /></span><h3>Create post</h3></div><button aria-label="Close post composer" disabled={postingActivity} onClick={() => setActivityComposerOpen(false)}><CloseOutlined /></button></div>
           <div className="activity-composer-head"><Avatar name={me.username} avatarPath={me.avatarPath} /><b>{me.username}</b></div>
           <textarea maxLength={2000} value={activityText} onChange={event => setActivityText(event.target.value)} placeholder="What's happening today?" aria-label="Write an activity post" />
           {activityFiles.length > 0 && <div className="activity-file-list">{activityFiles.map(file => {
@@ -1714,10 +1732,10 @@ export default function App() {
           {!publicConfig.mediaEnabled && <p className="activity-storage-note">Photo and video posts are paused until durable media storage is configured. Your text posts still work.</p>}
           <div className="activity-composer-actions">
             <input ref={activityInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onChange={event => { selectActivityFiles(event.target.files); event.target.value = ''; }} />
-            <button className="btn ghost" disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onClick={() => activityInputRef.current?.click()}>Add photos/videos</button>
+            <button className="btn ghost activity-add-media" disabled={!publicConfig.mediaEnabled || postingActivity || activityFiles.length >= 5} onClick={() => activityInputRef.current?.click()}><PictureOutlined /><VideoCameraOutlined /> Add media</button>
             <span className="grow" />
             <small>{activityText.length}/2000</small>
-            <button className="btn" disabled={postingActivity || (!activityText.trim() && !activityFiles.length)} onClick={publishActivity}>{postingActivity ? 'Posting…' : 'Post'}</button>
+            <button className="btn activity-publish" disabled={postingActivity || (!activityText.trim() && !activityFiles.length)} onClick={publishActivity}>{postingActivity ? <><LoadingOutlined spin /> Posting…</> : <><SendOutlined /> Share post</>}</button>
           </div>
         </section>
       </div>}
