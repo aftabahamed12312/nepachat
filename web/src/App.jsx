@@ -58,7 +58,7 @@ const getDeviceName = () => {
   return `${platform} browser`;
 };
 
-function Auth({ onAuth, allowPublicSignUp }) {
+function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   const onAuthRef = useRef(onAuth);
   onAuthRef.current = onAuth;
   const [mode, setMode] = useState('login');
@@ -156,7 +156,8 @@ function Auth({ onAuth, allowPublicSignUp }) {
           : <label>Password<input type="password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>}
         {err && <div className="err">{err}</div>}
         {notice && <div className="notice">{notice}</div>}
-        <button className="btn">{mode === 'login' ? 'Sign in' : awaitingCode ? 'Verify and create account' : 'Send verification code'}</button>
+        {mode === 'register' && !awaitingCode && !emailVerificationEnabled && <div className="err">Email verification is not configured on the server. Ask the administrator to set up an email provider.</div>}
+        <button className="btn" disabled={mode === 'register' && !awaitingCode && !emailVerificationEnabled}>{mode === 'login' ? 'Sign in' : awaitingCode ? 'Verify and create account' : 'Send verification code'}</button>
         {mode === 'register' && awaitingCode && <button type="button" className="text-button" onClick={resend}>Send a new code</button>}
         {allowPublicSignUp
           ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
@@ -727,7 +728,7 @@ function LocationShareDialog({ onStart, onClose }) {
 
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
-  const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
+  const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, emailVerificationEnabled: false, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
   const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
@@ -1544,7 +1545,7 @@ export default function App() {
     }
   };
 
-  if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} />;
+  if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} emailVerificationEnabled={publicConfig.emailVerificationEnabled} />;
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
