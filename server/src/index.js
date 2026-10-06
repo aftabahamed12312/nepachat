@@ -4,7 +4,7 @@ import http from 'http';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { Server } from 'socket.io';
-import { MongoClient, ObjectId } from 'mongodb';
+import { GridFSBucket, MongoClient, ObjectId } from 'mongodb';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
@@ -26,7 +26,8 @@ const {
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings');
+const mediaFiles = db.collection('media.files');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), activityLikes = db.collection('activityLikes'), activityComments = db.collection('activityComments'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -40,6 +41,11 @@ await locationShares.createIndex({ chatId: 1, ownerId: 1 });
 await pushSubs.createIndex({ endpoint: 1 }, { unique: true });
 await pushSubs.createIndex({ userId: 1 });
 await activityPosts.createIndex({ createdAt: -1, _id: -1 });
+await activityLikes.createIndex({ postId: 1, userId: 1 }, { unique: true });
+await activityComments.createIndex({ postId: 1, createdAt: -1, _id: -1 });
+await activityComments.createIndex({ authorId: 1 });
+await mediaFiles.createIndex({ 'metadata.key': 1 }, { unique: true });
+await db.collection('media.chunks').createIndex({ files_id: 1, n: 1 }, { unique: true });
 await friendships.createIndex({ pairKey: 1 }, { unique: true });
 await friendships.createIndex({ fromId: 1, status: 1 });
 await friendships.createIndex({ toId: 1, status: 1 });
@@ -55,7 +61,9 @@ const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : COR
 const localUploadsDir = path.resolve(UPLOADS_DIR || path.join(process.cwd(), 'uploads'));
 await fs.mkdir(localUploadsDir, { recursive: true });
 const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
-const mediaEnabled = r2Configured || UPLOADS_PERSISTENT === 'true' || NODE_ENV !== 'production';
+const gridFsConfigured = !r2Configured && UPLOADS_PERSISTENT !== 'true' && NODE_ENV === 'production';
+const mediaEnabled = true;
+const mediaBucket = gridFsConfigured ? new GridFSBucket(db, { bucketName: 'media' }) : null;
 const r2 = r2Configured ? new S3Client({
   region: 'auto',
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -319,6 +327,7 @@ const attachmentUrlFromKey = (req, key) => {
   const host = req?.get('host');
   const protocol = req?.secure ? 'https' : 'http';
   const base = process.env.PUBLIC_MEDIA_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
+  if (gridFsConfigured) return `${base.replace(/\/$/, '')}/api/media?key=${encodeURIComponent(raw)}`;
   return `${base.replace(/\/$/, '')}/uploads/${raw.replace(/^uploads\//, '')}`;
 };
 
@@ -611,6 +620,7 @@ app.delete('/api/admin/users/:id', auth, admin, wrap(async (req, res) => {
   const sessions = await deviceSessions.find({ userId: userIdString }, { projection: { _id: 1 } }).toArray();
   const deviceIds = sessions.map(device => device._id);
   const posts = await activityPosts.find({ authorId: userIdString }, { projection: { attachments: 1 } }).toArray();
+  const postIds = posts.map(post => post._id);
   const messages = chatIds.length
     ? await msgs.find({ chatId: { $in: chatIds } }, { projection: { attachments: 1 } }).toArray()
     : [];
@@ -642,6 +652,8 @@ app.delete('/api/admin/users/:id', auth, admin, wrap(async (req, res) => {
     msgs.deleteMany({ chatId: { $in: chatIds } }),
     chats.deleteMany({ members: userIdString }),
     activityPosts.deleteMany({ authorId: userIdString }),
+    activityLikes.deleteMany({ $or: [{ userId: userIdString }, { postId: { $in: postIds } }] }),
+    activityComments.deleteMany({ $or: [{ authorId: userIdString }, { postId: { $in: postIds } }] }),
     friendships.deleteMany({ $or: [{ fromId: userIdString }, { toId: userIdString }] }),
     calls.deleteMany({ participants: userIdString }),
     locationShares.deleteMany({
@@ -676,6 +688,20 @@ app.delete('/api/admin/users/:id', auth, admin, wrap(async (req, res) => {
         console.error(`Unable to remove account media for ${userIdString}:`, error);
         cleanupFailures += keys.slice(offset).length;
         break;
+      }
+    }
+  } else if (gridFsConfigured) {
+    const storedFiles = await mediaFiles.find({
+      $or: mediaPrefixes.map(prefix => ({
+        'metadata.key': { $regex: `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
+      })),
+    }, { projection: { _id: 1, 'metadata.key': 1 } }).toArray();
+    for (const file of storedFiles) {
+      try {
+        await mediaBucket.delete(file._id);
+      } catch (error) {
+        console.error(`Unable to remove MongoDB media ${file.metadata?.key || file._id} for account ${userIdString}:`, error);
+        cleanupFailures += 1;
       }
     }
   } else {
@@ -750,9 +776,42 @@ app.get('/api/users/:id/avatar', wrap(async (req, res) => {
     const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: user.avatarKey }), { expiresIn: 3600 });
     return res.redirect(302, url);
   }
+  if (gridFsConfigured) {
+    const file = await mediaFiles.findOne({ 'metadata.key': user.avatarKey });
+    if (!file) return res.status(404).end();
+    res.set('Content-Type', file.metadata?.contentType || 'application/octet-stream');
+    res.set('Content-Length', String(file.length));
+    res.set('Cache-Control', 'private, max-age=3600');
+    const stream = mediaBucket.openDownloadStream(file._id);
+    stream.on('error', error => {
+      console.error('Unable to stream profile image:', error);
+      if (res.headersSent) res.destroy(error);
+      else res.status(500).end();
+    });
+    return stream.pipe(res);
+  }
   const file = path.resolve(localUploadsDir, user.avatarKey);
   if (!file.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(404).end();
   res.sendFile(file);
+}));
+
+app.get('/api/media', wrap(async (req, res) => {
+  if (!gridFsConfigured) return res.status(404).end();
+  const key = String(req.query.key || '');
+  const validKey = /^(?:activity\/[a-f0-9]{24}|profile\/[a-f0-9]{24}|[a-f0-9]{24}\/[a-f0-9]{24})\/[a-f0-9-]{36}\.(?:jpg|png|webp|gif|mp4|webm)$/.test(key);
+  if (!validKey) return res.status(404).end();
+  const file = await mediaFiles.findOne({ 'metadata.key': key });
+  if (!file) return res.status(404).end();
+  res.set('Content-Type', file.metadata?.contentType || 'application/octet-stream');
+  res.set('Content-Length', String(file.length));
+  res.set('Cache-Control', 'public, max-age=3600');
+  const stream = mediaBucket.openDownloadStream(file._id);
+  stream.on('error', error => {
+    console.error('Unable to stream stored media:', error);
+    if (res.headersSent) res.destroy(error);
+    else res.status(500).end();
+  });
+  stream.pipe(res);
 }));
 
 app.get('/api/calls/history', auth, wrap(async (req, res) => {
@@ -981,6 +1040,15 @@ const storeMedia = async (prefix, body, type) => {
   const key = `${prefix}/${randomUUID()}${extensionForMediaType[type]}`;
   if (r2Configured) {
     await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: body, ContentType: type }));
+  } else if (gridFsConfigured) {
+    const stream = mediaBucket.openUploadStream(path.basename(key), {
+      metadata: { key, contentType: type, size: body.length },
+    });
+    await new Promise((resolve, reject) => {
+      stream.once('finish', resolve);
+      stream.once('error', reject);
+      stream.end(body);
+    });
   } else {
     const targetDir = path.join(localUploadsDir, ...prefix.split('/'));
     await fs.mkdir(targetDir, { recursive: true });
@@ -994,9 +1062,32 @@ const removeStoredMedia = async key => {
     await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
     return;
   }
+  if (gridFsConfigured) {
+    const file = await mediaFiles.findOne({ 'metadata.key': key }, { projection: { _id: 1 } });
+    if (file) await mediaBucket.delete(file._id);
+    return;
+  }
   const file = path.resolve(localUploadsDir, key);
   if (!file.startsWith(`${localUploadsDir}${path.sep}`)) throw new Error('Refusing to remove media outside the upload directory');
   await fs.rm(file, { force: true });
+};
+const storedMediaMatches = async (key, size, type) => {
+  if (r2Configured) {
+    const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+    return object.ContentLength === size && object.ContentType === type;
+  }
+  if (gridFsConfigured) {
+    const file = await mediaFiles.findOne({ 'metadata.key': key }, { projection: { length: 1, metadata: 1 } });
+    return Boolean(file && file.length === size && file.metadata?.contentType === type);
+  }
+  const file = path.resolve(localUploadsDir, key);
+  if (!file.startsWith(`${localUploadsDir}${path.sep}`)) return false;
+  try {
+    const info = await fs.stat(file);
+    return info.isFile() && info.size === size;
+  } catch {
+    return false;
+  }
 };
 
 app.put('/api/chats/:id/uploads', auth, express.raw({ type: '*/*', limit: mediaLimit }), wrap(async (req, res) => {
@@ -1059,7 +1150,8 @@ app.put('/api/me/avatar', auth, express.raw({ type: '*/*', limit: avatarLimit })
   res.json(accountView({ ...user, avatarKey }));
 }));
 
-async function activityPostView(post, req) {
+async function activityPostView(post, req, metrics = new Map()) {
+  const postMetrics = metrics.get(String(post._id)) || {};
   const author = await users.findOne({ _id: oid(post.authorId) });
   const attachments = await Promise.all((post.attachments || []).map(async attachment => ({
     ...attachment,
@@ -1073,17 +1165,70 @@ async function activityPostView(post, req) {
     createdAt: post.createdAt,
     author: author ? pub(author) : { id: post.authorId, username: 'unknown', email: '' },
     attachments,
+    likeCount: postMetrics.likeCount || 0,
+    commentCount: postMetrics.commentCount || 0,
+    likedByMe: Boolean(postMetrics.likedByMe),
   };
 }
 
-app.get('/api/activity/posts', auth, wrap(async (req, res) => {
+async function activityPostMetrics(posts, userId) {
+  const ids = posts.map(post => post._id);
+  if (!ids.length) return new Map();
+  const [likes, comments] = await Promise.all([
+    activityLikes.aggregate([
+      { $match: { postId: { $in: ids } } },
+      { $group: {
+        _id: '$postId',
+        likeCount: { $sum: 1 },
+        likedByMe: { $sum: { $cond: [{ $eq: ['$userId', userId] }, 1, 0] } },
+      } },
+    ]).toArray(),
+    activityComments.aggregate([
+      { $match: { postId: { $in: ids } } },
+      { $group: { _id: '$postId', commentCount: { $sum: 1 } } },
+    ]).toArray(),
+  ]);
+  const metrics = new Map();
+  for (const item of likes) metrics.set(String(item._id), { likeCount: item.likeCount, likedByMe: item.likedByMe > 0 });
+  for (const item of comments) {
+    const current = metrics.get(String(item._id)) || {};
+    metrics.set(String(item._id), { ...current, commentCount: item.commentCount });
+  }
+  return metrics;
+}
+
+async function activityPostForViewer(postId, userId) {
+  const id = oid(postId);
+  if (!id) return null;
+  const post = await activityPosts.findOne({ _id: id });
+  if (!post) return null;
+  if (post.authorId !== userId) {
+    const pairKey = [post.authorId, userId].sort().join('~');
+    if (!await friendships.findOne({ pairKey, status: 'accepted' })) return null;
+  }
+  return post;
+}
+
+async function activityRecipients(authorId) {
   const accepted = await friendships.find({
     status: 'accepted',
-    $or: [{ fromId: req.uid }, { toId: req.uid }],
+    $or: [{ fromId: authorId }, { toId: authorId }],
   }, { projection: { fromId: 1, toId: 1 } }).toArray();
-  const visibleAuthors = [req.uid, ...accepted.map(link => link.fromId === req.uid ? link.toId : link.fromId)];
+  return [authorId, ...accepted.map(link => link.fromId === authorId ? link.toId : link.fromId)];
+}
+
+app.get('/api/activity/posts', auth, wrap(async (req, res) => {
+  const visibleAuthors = await activityRecipients(req.uid);
   const list = await activityPosts.find({ authorId: { $in: visibleAuthors } }).sort({ createdAt: -1, _id: -1 }).limit(50).toArray();
-  res.json(await Promise.all(list.map(post => activityPostView(post, req))));
+  const metrics = await activityPostMetrics(list, req.uid);
+  res.json(await Promise.all(list.map(post => activityPostView(post, req, metrics))));
+}));
+
+app.get('/api/activity/posts/:id', auth, wrap(async (req, res) => {
+  const post = await activityPostForViewer(req.params.id, req.uid);
+  if (!post) return res.status(404).json({ error: 'Activity post not found' });
+  const metrics = await activityPostMetrics([post], req.uid);
+  res.json(await activityPostView(post, req, metrics));
 }));
 
 app.post('/api/activity/posts', auth, wrap(async (req, res) => {
@@ -1097,28 +1242,13 @@ app.post('/api/activity/posts', auth, wrap(async (req, res) => {
     if (!validKey || !mediaTypes.has(item.type) || path.posix.extname(item.key) !== extensionForMediaType[item.type] || !Number.isInteger(item.size) || item.size < 1 || item.size > mediaLimit) {
       return res.status(400).json({ error: 'Invalid activity attachment' });
     }
-    if (r2Configured) {
-      const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: item.key }));
-      if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
-    } else {
-      const localFile = path.resolve(localUploadsDir, item.key);
-      if (!localFile.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(400).json({ error: 'Invalid activity attachment' });
-      try {
-        await fs.access(localFile);
-      } catch {
-        return res.status(400).json({ error: 'Attachment file was not found' });
-      }
-    }
+    if (!await storedMediaMatches(item.key, item.size, item.type)) return res.status(400).json({ error: 'Attachment metadata did not match the uploaded file or the file was not found' });
     attachments.push({ key: item.key, type: item.type, name: String(item.name || 'activity').slice(0, 120), size: item.size });
   }
   const post = { authorId: req.uid, text, attachments, createdAt: Date.now() };
   const result = await activityPosts.insertOne(post);
   const view = await activityPostView({ ...post, _id: result.insertedId }, req);
-  const accepted = await friendships.find({
-    status: 'accepted',
-    $or: [{ fromId: req.uid }, { toId: req.uid }],
-  }, { projection: { fromId: 1, toId: 1 } }).toArray();
-  const recipients = [req.uid, ...accepted.map(link => link.fromId === req.uid ? link.toId : link.fromId)];
+  const recipients = await activityRecipients(req.uid);
   io.to(recipients.map(userId => 'u:' + userId)).emit('activity:post', view);
   await Promise.all(recipients.filter(userId => userId !== req.uid).map(userId => notifyUser(userId, {
     title: `New activity from ${view.author.username}`,
@@ -1127,6 +1257,94 @@ app.post('/api/activity/posts', auth, wrap(async (req, res) => {
     url: '/?notifications=activity',
   })));
   res.status(201).json(view);
+}));
+
+app.put('/api/activity/posts/:id/like', auth, wrap(async (req, res) => {
+  const post = await activityPostForViewer(req.params.id, req.uid);
+  if (!post) return res.status(404).json({ error: 'Activity post not found' });
+  if (typeof req.body.liked !== 'boolean') return res.status(400).json({ error: 'Choose whether to like or unlike this post' });
+  const filter = { postId: post._id, userId: req.uid };
+  if (req.body.liked) {
+    try {
+      await activityLikes.insertOne({ ...filter, createdAt: Date.now() });
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+    }
+  } else {
+      await activityLikes.deleteOne(filter);
+  }
+    if (!await activityPosts.findOne({ _id: post._id }, { projection: { _id: 1 } })) {
+      await activityLikes.deleteOne(filter);
+      return res.status(404).json({ error: 'Activity post not found' });
+    }
+  const likeCount = await activityLikes.countDocuments({ postId: post._id });
+  const recipients = await activityRecipients(post.authorId);
+  io.to(recipients.map(userId => 'u:' + userId)).emit('activity:engagement', { postId: String(post._id) });
+  res.json({ liked: req.body.liked, likeCount });
+}));
+
+app.get('/api/activity/posts/:id/comments', auth, wrap(async (req, res) => {
+  const post = await activityPostForViewer(req.params.id, req.uid);
+  if (!post) return res.status(404).json({ error: 'Activity post not found' });
+  const comments = await activityComments.find({ postId: post._id }).sort({ createdAt: -1, _id: -1 }).limit(50).toArray();
+  const ordered = comments.reverse();
+  res.json(await Promise.all(ordered.map(async comment => {
+    const author = await users.findOne({ _id: oid(comment.authorId) });
+    return {
+      id: String(comment._id),
+      text: comment.text,
+      createdAt: comment.createdAt,
+      author: author ? pub(author) : { id: comment.authorId, username: 'unknown', email: '' },
+    };
+  })));
+}));
+
+app.post('/api/activity/posts/:id/comments', auth, wrap(async (req, res) => {
+  const post = await activityPostForViewer(req.params.id, req.uid);
+  if (!post) return res.status(404).json({ error: 'Activity post not found' });
+  const text = String(req.body.text || '').trim();
+  if (!text || text.length > 1000) return res.status(400).json({ error: 'Comments must be between 1 and 1,000 characters' });
+  const comment = { postId: post._id, authorId: req.uid, text, createdAt: Date.now() };
+  const result = await activityComments.insertOne(comment);
+  if (!await activityPosts.findOne({ _id: post._id }, { projection: { _id: 1 } })) {
+    await activityComments.deleteOne({ _id: result.insertedId });
+    return res.status(404).json({ error: 'Activity post not found' });
+  }
+  const commentCount = await activityComments.countDocuments({ postId: post._id });
+  const author = await users.findOne({ _id: oid(req.uid) });
+  const recipients = await activityRecipients(post.authorId);
+  io.to(recipients.map(userId => 'u:' + userId)).emit('activity:engagement', { postId: String(post._id) });
+  res.status(201).json({
+    id: String(result.insertedId),
+    text: comment.text,
+    createdAt: comment.createdAt,
+    commentCount,
+    author: author ? pub(author) : { id: req.uid, username: 'unknown', email: '' },
+  });
+}));
+
+app.delete('/api/activity/posts/:id', auth, wrap(async (req, res) => {
+  const id = oid(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid activity post' });
+  const post = await activityPosts.findOne({ _id: id });
+  if (!post) return res.status(404).json({ error: 'Activity post not found' });
+  if (post.authorId !== req.uid) return res.status(403).json({ error: 'You can only delete your own activity posts' });
+  const removed = await activityPosts.deleteOne({ _id: id, authorId: req.uid });
+  if (!removed.deletedCount) return res.status(404).json({ error: 'Activity post not found' });
+  await Promise.all([
+    activityLikes.deleteMany({ postId: id }),
+    activityComments.deleteMany({ postId: id }),
+  ]);
+  await Promise.all((post.attachments || []).map(async attachment => {
+    try {
+      await removeStoredMedia(attachment.key);
+    } catch (error) {
+      console.error(`Unable to remove deleted activity media ${attachment.key}:`, error);
+    }
+  }));
+  const recipients = await activityRecipients(post.authorId);
+  io.to(recipients.map(userId => 'u:' + userId)).emit('activity:deleted', { postId: String(id) });
+  res.json({ ok: true });
 }));
 
 async function locationView(share) {
@@ -1213,17 +1431,7 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
     if (typeof item.key !== 'string' || !item.key.startsWith(attachmentPrefix) || !mediaTypes.has(item.type) || !Number.isInteger(item.size) || item.size < 1 || item.size > mediaLimit) {
       return res.status(400).json({ error: 'Invalid attachment' });
     }
-    if (r2Configured) {
-      const object = await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: item.key }));
-      if (object.ContentLength !== item.size || object.ContentType !== item.type) return res.status(400).json({ error: 'Attachment metadata did not match uploaded file' });
-    } else {
-      const localFile = path.join(localUploadsDir, item.key);
-      try {
-        await fs.access(localFile);
-      } catch {
-        return res.status(400).json({ error: 'Attachment file was not found' });
-      }
-    }
+    if (!await storedMediaMatches(item.key, item.size, item.type)) return res.status(400).json({ error: 'Attachment metadata did not match the uploaded file or the file was not found' });
     attachments.push({ key: item.key, type: item.type, name: String(item.name || 'attachment').slice(0, 120), size: item.size });
   }
   const m = { chatId: req.params.id, from: req.uid, text, attachments, ts: Date.now(), deliveredTo: [], readBy: [], replyTo: replyTo || null };

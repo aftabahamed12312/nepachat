@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import {
   CloseOutlined,
+  CommentOutlined,
+  DeleteOutlined,
+  HeartFilled,
+  HeartOutlined,
   LoadingOutlined,
   PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
+  ShareAltOutlined,
   SendOutlined,
   TeamOutlined,
   UserAddOutlined,
@@ -716,6 +721,14 @@ export default function App() {
   const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
   const [activityUploadProgress, setActivityUploadProgress] = useState({});
   const [activityComposerOpen, setActivityComposerOpen] = useState(false);
+  const [activityComments, setActivityComments] = useState({});
+  const [activityCommentDrafts, setActivityCommentDrafts] = useState({});
+  const [activityCommentErrors, setActivityCommentErrors] = useState({});
+  const [activityCommentPostId, setActivityCommentPostId] = useState('');
+  const [activityCommentLoading, setActivityCommentLoading] = useState('');
+  const [activityCommentSubmitting, setActivityCommentSubmitting] = useState('');
+  const [activityLikeUpdating, setActivityLikeUpdating] = useState('');
+  const activityTargetRef = useRef('');
   const [friendData, setFriendData] = useState({ friends: [], incoming: [], outgoing: [] });
   const [friendPanel, setFriendPanel] = useState('');
   const [friendQuery, setFriendQuery] = useState('');
@@ -738,8 +751,10 @@ export default function App() {
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   const backStateRef = useRef(null);
+  const activityCommentPostRef = useRef(activityCommentPostId);
   activeRef.current = active;
   activeViewRef.current = activeView;
+  activityCommentPostRef.current = activityCommentPostId;
   callRef.current = callState;
   backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
@@ -790,11 +805,13 @@ export default function App() {
       setPublicConfig(config);
       if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
       const notificationTarget = new URLSearchParams(window.location.search).get('notifications');
+      const sharedActivityId = new URLSearchParams(window.location.search).get('activity');
       if (notificationTarget === 'friends') {
         setActiveView('activity');
         setFriendPanel('requests');
-      } else if (notificationTarget === 'activity') {
+      } else if (notificationTarget === 'activity' || sharedActivityId) {
         setActiveView('activity');
+        if (sharedActivityId) activityTargetRef.current = sharedActivityId;
       }
     }).catch(() => {}).finally(() => setConfigLoaded(true));
   }, []);
@@ -1240,6 +1257,17 @@ export default function App() {
     });
     s.on('location:update', share => setLocationShares(current => [...current.filter(item => item.id !== share.id), share]));
     s.on('activity:post', post => setActivityPosts(current => [post, ...current.filter(item => item.id !== post.id)].slice(0, 50)));
+    s.on('activity:engagement', ({ postId }) => {
+      if (activeViewRef.current !== 'activity') return;
+      call('/activity/posts', token).then(posts => setActivityPosts(posts)).catch(error => console.error(`Unable to refresh activity post ${postId}:`, error));
+      if (activityCommentPostRef.current === postId) {
+        call(`/activity/posts/${postId}/comments`, token).then(comments => setActivityComments(current => ({ ...current, [postId]: comments }))).catch(error => console.error(`Unable to refresh comments for activity post ${postId}:`, error));
+      }
+    });
+    s.on('activity:deleted', ({ postId }) => {
+      setActivityPosts(current => current.filter(post => post.id !== postId));
+      setActivityComments(current => { const next = { ...current }; delete next[postId]; return next; });
+    });
     s.on('activity:post', post => {
       if (post.author.id !== me.id) {
         showSystemNotification(`New activity from ${post.author.username}`, {
@@ -1326,11 +1354,39 @@ export default function App() {
     setActivityLoading(true);
     setActivityError('');
     Promise.all([call('/activity/posts', token), refreshFriendData()])
-      .then(([posts]) => { if (current) setActivityPosts(posts); })
+      .then(async ([posts]) => {
+        if (!current) return;
+        const sharedActivityId = activityTargetRef.current;
+        if (sharedActivityId) {
+          try {
+            const sharedPost = await call(`/activity/posts/${encodeURIComponent(sharedActivityId)}`, token);
+            if (!current) return;
+            setActivityPosts([sharedPost, ...posts.filter(post => post.id !== sharedPost.id)]);
+          } catch (error) {
+            if (current) {
+              setActivityPosts(posts);
+              setActivityError(error.status === 404 ? 'This post is unavailable or you are not friends with its author.' : error.message);
+            }
+          }
+        } else {
+          setActivityPosts(posts);
+        }
+      })
       .catch(error => { if (current) setActivityError(error.message); })
       .finally(() => { if (current) setActivityLoading(false); });
     return () => { current = false; };
   }, [activeView, token]);
+  useEffect(() => {
+    if (activeView !== 'activity' || !activityTargetRef.current || activityLoading) return;
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`activity-post-${activityTargetRef.current}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      activityTargetRef.current = '';
+      history.replaceState(null, '', window.location.pathname);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activityPosts, activityLoading, activeView]);
 
   useEffect(() => {
     if (activeView !== 'activity' || friendPanel !== 'discover' || friendQuery.trim().length < 2) {
@@ -1447,6 +1503,92 @@ export default function App() {
     if (!updatedAttachment?.url) throw new Error('This media is no longer available.');
     setActivityPosts(current => current.map(post => post.id === postId ? updatedPost : post));
     return updatedAttachment.url;
+  };
+  const toggleActivityLike = async post => {
+    if (activityLikeUpdating) return;
+    setActivityLikeUpdating(post.id);
+    try {
+      const result = await call(`/activity/posts/${post.id}/like`, token, 'PUT', { liked: !post.likedByMe });
+      setActivityPosts(current => current.map(item => item.id === post.id
+        ? { ...item, likedByMe: result.liked, likeCount: result.likeCount }
+        : item));
+    } catch (error) {
+      addAlert(error.message || 'Could not update your like.', 'error');
+    } finally {
+      setActivityLikeUpdating('');
+    }
+  };
+  const toggleActivityComments = async postId => {
+    if (activityCommentPostId === postId) {
+      setActivityCommentPostId('');
+      return;
+    }
+    setActivityCommentPostId(postId);
+    if (activityComments[postId]) return;
+    setActivityCommentLoading(postId);
+    setActivityCommentErrors(current => ({ ...current, [postId]: '' }));
+    try {
+      const comments = await call(`/activity/posts/${postId}/comments`, token);
+      setActivityComments(current => ({ ...current, [postId]: comments }));
+    } catch (error) {
+      setActivityCommentErrors(current => ({ ...current, [postId]: error.message || 'Could not load comments.' }));
+    } finally {
+      setActivityCommentLoading('');
+    }
+  };
+  const submitActivityComment = async postId => {
+    const text = String(activityCommentDrafts[postId] || '').trim();
+    if (!text || activityCommentSubmitting) return;
+    setActivityCommentSubmitting(postId);
+    setActivityCommentErrors(current => ({ ...current, [postId]: '' }));
+    try {
+      const comment = await call(`/activity/posts/${postId}/comments`, token, 'POST', { text });
+      setActivityComments(current => ({
+        ...current,
+        [postId]: current[postId]?.some(item => item.id === comment.id)
+          ? current[postId]
+          : [...(current[postId] || []), comment],
+      }));
+      setActivityCommentDrafts(current => ({ ...current, [postId]: '' }));
+      setActivityPosts(current => current.map(post => post.id === postId
+        ? { ...post, commentCount: comment.commentCount }
+        : post));
+    } catch (error) {
+      setActivityCommentErrors(current => ({ ...current, [postId]: error.message || 'Could not add your comment.' }));
+    } finally {
+      setActivityCommentSubmitting('');
+    }
+  };
+  const shareActivityPost = async post => {
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.hash = '';
+    url.searchParams.set('activity', post.id);
+    const shareData = {
+      title: `Activity by ${post.author.username}`,
+      text: post.text || 'Shared a photo or video on NepaChat',
+      url: url.toString(),
+    };
+    try {
+      if (navigator.share) await navigator.share(shareData);
+      else {
+        await navigator.clipboard.writeText(shareData.url);
+        addAlert('Activity link copied. Only the author’s friends can view this post.', 'success');
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') addAlert('Unable to share this activity link.', 'error');
+    }
+  };
+  const deleteActivityPost = async post => {
+    if (post.author.id !== me.id || !window.confirm('Delete this activity post? Its comments and likes will also be removed.')) return;
+    try {
+      await call(`/activity/posts/${post.id}`, token, 'DELETE');
+      setActivityPosts(current => current.filter(item => item.id !== post.id));
+      setActivityComments(current => { const next = { ...current }; delete next[post.id]; return next; });
+      addAlert('Activity post deleted.', 'success');
+    } catch (error) {
+      addAlert(error.message || 'Could not delete this post.', 'error');
+    }
   };
   const handleFilesSelected = fileList => {
     if (sendingRef.current) {
@@ -1643,12 +1785,38 @@ export default function App() {
           </button>
           <div className="activity-feed" aria-live="polite">
             {activityLoading && !activityPosts.length && <p className="muted">Loading activity…</p>}
+            {activityError && !activityComposerOpen && <p className="err activity-feed-error">{activityError}</p>}
             {!activityLoading && !activityError && !activityPosts.length && <div className="empty activity-empty"><div><PictureOutlined /></div><h3>No activity yet</h3><p>Share your first update with the community.</p></div>}
-            {activityPosts.map((post, index) => <article className="activity-post" style={{ '--post-index': index }} key={post.id}>
+            {activityPosts.map((post, index) => <article id={`activity-post-${post.id}`} className="activity-post" style={{ '--post-index': index }} key={post.id}>
               <header><Avatar name={post.author.username} avatarPath={post.author.avatarPath} /><div><b>{post.author.username}</b><time>{new Date(post.createdAt).toLocaleString()}</time></div></header>
               {post.text && <p className="activity-post-text">{post.text}</p>}
               {post.attachments?.length > 0 && <div className="activity-media">{post.attachments.map(attachment =>
                 <ActivityMediaItem key={attachment.key} attachment={attachment} onRefresh={() => refreshActivityAttachment(post.id, attachment.key)} />)}</div>}
+              <div className="activity-actions" aria-label="Activity actions">
+                <button className={'activity-action' + (post.likedByMe ? ' liked' : '')} aria-label={post.likedByMe ? 'Unlike this post' : 'Like this post'} aria-pressed={Boolean(post.likedByMe)} disabled={activityLikeUpdating === post.id} onClick={() => toggleActivityLike(post)}>
+                  {post.likedByMe ? <HeartFilled /> : <HeartOutlined />}<span>{post.likeCount || 0}</span>
+                </button>
+                <button className={'activity-action' + (activityCommentPostId === post.id ? ' active' : '')} aria-label="Show comments" aria-expanded={activityCommentPostId === post.id} onClick={() => toggleActivityComments(post.id)}>
+                  <CommentOutlined /><span>{post.commentCount || 0}</span>
+                </button>
+                <button className="activity-action activity-share" aria-label="Share this post" onClick={() => shareActivityPost(post)}><ShareAltOutlined /><span>Share</span></button>
+                {post.author.id === me.id && <button className="activity-action activity-delete" aria-label="Delete this post" onClick={() => deleteActivityPost(post)}><DeleteOutlined /><span>Delete</span></button>}
+              </div>
+              {activityCommentPostId === post.id && <section className="activity-comments" aria-label={`Comments on ${post.author.username}'s post`}>
+                {activityCommentLoading === post.id
+                  ? <p className="muted activity-comments-loading"><LoadingOutlined spin /> Loading comments…</p>
+                  : (activityComments[post.id] || []).map(comment => <div className="activity-comment" key={comment.id}>
+                    <Avatar name={comment.author.username} avatarPath={comment.author.avatarPath} />
+                    <div><b>{comment.author.username}</b><p>{comment.text}</p><time>{new Date(comment.createdAt).toLocaleString()}</time></div>
+                  </div>)}
+                {activityCommentErrors[post.id] && <p className="err">{activityCommentErrors[post.id]}</p>}
+                <form className="activity-comment-form" onSubmit={event => { event.preventDefault(); submitActivityComment(post.id); }}>
+                  <textarea value={activityCommentDrafts[post.id] || ''} maxLength={1000} aria-label="Write a comment" placeholder="Write a comment…" onChange={event => setActivityCommentDrafts(current => ({ ...current, [post.id]: event.target.value }))} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submitActivityComment(post.id); }} />
+                  <button className="btn" type="submit" disabled={activityCommentSubmitting === post.id || !(activityCommentDrafts[post.id] || '').trim()} aria-label="Send comment">
+                    {activityCommentSubmitting === post.id ? <LoadingOutlined spin /> : <SendOutlined />}
+                  </button>
+                </form>
+              </section>}
             </article>)}
           </div>
           <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}><PlusOutlined /></button>
