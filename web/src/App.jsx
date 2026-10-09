@@ -44,6 +44,38 @@ const getCallMedia = async (constraints, device = 'camera and microphone') => {
     throw new Error(getCallMediaError(error, device));
   }
 };
+const getCallStream = async (kind, onVideoReady) => {
+  if (kind !== 'video') {
+    return { stream: await getCallMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    }) };
+  }
+  const cameraStream = await getCallMedia({
+    audio: false,
+    video: { facingMode: { ideal: 'user' } },
+  }, 'camera');
+  const videoTrack = cameraStream.getVideoTracks()[0];
+  if (!videoTrack || videoTrack.readyState !== 'live') {
+    cameraStream.getTracks().forEach(track => track.stop());
+    throw new Error('Camera access did not provide a live video track. Check camera permissions and device settings.');
+  }
+  onVideoReady?.(cameraStream);
+  let audioTrack;
+  let audioError = '';
+  try {
+    const microphoneStream = await getCallMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    }, 'microphone');
+    audioTrack = microphoneStream.getAudioTracks()[0];
+    if (!audioTrack) audioError = 'Microphone access is unavailable; this video call will have no outgoing audio.';
+    microphoneStream.getTracks().filter(track => track !== audioTrack).forEach(track => track.stop());
+  } catch (error) {
+    audioError = `Camera is active, but ${error.message}`;
+  }
+  return { stream: new MediaStream([...(audioTrack ? [audioTrack] : []), videoTrack]), audioError };
+};
 const attachmentKey = file => `${file.name}-${file.size}-${file.lastModified}`;
 const mediaTypeFromFile = file => {
   const lowerName = String(file.name || '').toLowerCase();
@@ -1223,35 +1255,43 @@ export default function App() {
 
   const startCall = async kind => {
     if (!active || !socketRef.current || callRef.current) return;
-    let stream;
+    const current = {
+      chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id,
+      peerName: '@' + active.other.username, kind, status: 'preparing',
+    };
+    callRef.current = current;
+    setCallState(current);
+    setCallLayout('overlay');
     try {
       if (kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
-      stream = await getCallMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
+      const { stream, audioError } = await getCallStream(kind, cameraStream => {
+        if (callRef.current?.callId !== current.callId) return;
+        setCameraFacing(cameraStream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
+        localStreamRef.current = cameraStream;
+        setLocalStream(cameraStream);
       });
+      if (callRef.current?.callId !== current.callId) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       const videoTrack = stream.getVideoTracks()[0];
       if (kind === 'video' && (!videoTrack || videoTrack.readyState !== 'live')) {
         stream.getTracks().forEach(track => track.stop());
         throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
       }
       if (kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
-      const current = {
-        chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id,
-        peerName: '@' + active.other.username, kind, status: 'preparing',
-        error: kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
-      };
       callRef.current = current;
-      setCallState(current);
-      setCallLayout('overlay');
       localStreamRef.current = stream;
       setLocalStream(stream);
       setAudioEnabled(Boolean(stream.getAudioTracks().length));
+      const mediaReady = { ...current, error: audioError || '' };
+      callRef.current = mediaReady;
+      setCallState(mediaReady);
       const { iceServers } = await call('/calls/ice-servers', token);
       if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
       const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
-      const calling = { ...current, status: 'calling', hasTurnServer };
+      const calling = { ...mediaReady, status: 'calling', hasTurnServer };
       callRef.current = calling;
       setCallState(calling);
       const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
@@ -1259,7 +1299,9 @@ export default function App() {
       const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
       socketRef.current.emit('call:invite', { chatId: current.chatId, callId: current.callId, kind, offer: peer.localDescription });
     } catch (error) {
-      if (stream && callRef.current) {
+      if (callRef.current?.callId !== current.callId) return;
+      const existingStream = localStreamRef.current;
+      if (existingStream && callRef.current?.callId === current.callId) {
         peerRef.current?.close();
         peerRef.current = null;
         setPeerConnection(null);
@@ -1267,8 +1309,9 @@ export default function App() {
         callRef.current = failed;
         setCallState(failed);
       } else {
-        clearCall();
-        setCallState({ peerName: '@' + active.other.username, kind, status: 'error', error: error.message || 'Unable to start the call.' });
+        const failed = { ...current, status: 'error', error: error.message || 'Unable to start the call.' };
+        callRef.current = failed;
+        setCallState(failed);
       }
     }
   };
@@ -1276,24 +1319,29 @@ export default function App() {
   const acceptCall = async () => {
     const current = callRef.current;
     if (!current?.incoming) return;
-    let stream;
+    const preparing = { ...current, incoming: false, status: 'preparing', error: '' };
+    callRef.current = preparing;
+    setCallState(preparing);
     try {
       if (current.kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
-      stream = await getCallMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
+      const { stream, audioError } = await getCallStream(current.kind, cameraStream => {
+        if (callRef.current?.callId !== current.callId) return;
+        setCameraFacing(cameraStream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
+        localStreamRef.current = cameraStream;
+        setLocalStream(cameraStream);
       });
+      if (callRef.current?.callId !== current.callId) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       const videoTrack = stream.getVideoTracks()[0];
       if (current.kind === 'video' && (!videoTrack || videoTrack.readyState !== 'live')) {
         stream.getTracks().forEach(track => track.stop());
         throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
       }
       if (current.kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
-      const starting = {
-        ...current, incoming: false, status: 'preparing',
-        error: current.kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
-      };
+      const starting = { ...preparing, error: audioError || '' };
       callRef.current = starting;
       setCallState(starting);
       setCallLayout('overlay');
@@ -1316,7 +1364,8 @@ export default function App() {
       const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
       socketRef.current.emit('call:signal', { chatId: current.chatId, callId: current.callId, signal: { type: 'answer', sdp: peer.localDescription } });
     } catch (error) {
-      if (stream) {
+      if (callRef.current?.callId !== current.callId) return;
+      if (localStreamRef.current && callRef.current?.callId === current.callId) {
         peerRef.current?.close();
         peerRef.current = null;
         setPeerConnection(null);
@@ -1324,7 +1373,9 @@ export default function App() {
         callRef.current = failed;
         setCallState(failed);
       } else {
-        setCallState(c => c ? { ...c, error: error.message || 'Unable to answer the call.' } : c);
+        const failed = { ...preparing, status: 'error', error: error.message || 'Unable to answer the call.' };
+        callRef.current = failed;
+        setCallState(failed);
       }
     }
   };
