@@ -252,22 +252,51 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   return (
     <div className="auth">
       <header className="top"><b>Nepa<span>Chat</span></b></header>
-      <form className="card" onSubmit={go}>
-        <h2>{mode === 'login' ? 'Welcome back' : awaitingCode ? 'Check your email' : 'Create your account'}</h2>
-        {mode === 'register' && !awaitingCode && <label>Username<input value={f.username} onChange={set('username')} placeholder="sita_k" autoComplete="username" required /></label>}
-        <label>{mode === 'login' ? 'Email or username' : 'Email address'}<input type={mode === 'login' ? 'text' : 'email'} value={f.email} onChange={set('email')} placeholder="you@example.com" autoComplete={mode === 'login' ? 'username' : 'email'} required /></label>
-        {mode === 'register' && awaitingCode
-          ? <label>6-digit verification code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required /></label>
-          : <label>Password<input type="password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>}
-        {err && <div className="err">{err}</div>}
-        {notice && <div className="notice">{notice}</div>}
-        {mode === 'register' && !awaitingCode && !emailVerificationEnabled && <div className="err">Email verification is not configured on the server. Ask the administrator to set up an email provider.</div>}
-        <button className="btn" disabled={mode === 'register' && !awaitingCode && !emailVerificationEnabled}>{mode === 'login' ? 'Sign in' : awaitingCode ? 'Verify and create account' : 'Send verification code'}</button>
-        {mode === 'register' && awaitingCode && <button type="button" className="text-button" onClick={resend}>Send a new code</button>}
-        {allowPublicSignUp
-          ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
-          : <p className="sw">Account creation is managed by the owner.</p>}
-      </form>
+      <main className="auth-main">
+        <form className="card" onSubmit={go}>
+          <h2>{mode === 'login' ? 'Welcome back' : awaitingCode ? 'Check your email' : 'Create your account'}</h2>
+          {mode === 'register' && !awaitingCode && <label>Username<input value={f.username} onChange={set('username')} placeholder="sita_k" autoComplete="username" required /></label>}
+          <label>{mode === 'login' ? 'Email or username' : 'Email address'}<input type={mode === 'login' ? 'text' : 'email'} value={f.email} onChange={set('email')} placeholder="you@example.com" autoComplete={mode === 'login' ? 'username' : 'email'} required /></label>
+          {mode === 'register' && awaitingCode
+            ? <label>6-digit verification code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required /></label>
+            : <label>Password<input type="password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>}
+          {err && <div className="err">{err}</div>}
+          {notice && <div className="notice">{notice}</div>}
+          {mode === 'register' && !awaitingCode && !emailVerificationEnabled && <div className="err">Email verification is not configured on the server. Ask the administrator to set up an email provider.</div>}
+          <button className="btn" disabled={mode === 'register' && !awaitingCode && !emailVerificationEnabled}>{mode === 'login' ? 'Sign in' : awaitingCode ? 'Verify and create account' : 'Send verification code'}</button>
+          {mode === 'register' && awaitingCode && <button type="button" className="text-button" onClick={resend}>Send a new code</button>}
+          {allowPublicSignUp
+            ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
+            : <p className="sw">Account creation is managed by the owner.</p>}
+        </form>
+        <article className="auth-seo-content">
+          <header className="auth-seo-intro">
+            <p className="auth-seo-eyebrow">A simple way to stay in touch</p>
+            <h1>NepaChat: messaging and video calls in one place</h1>
+            <p>NepaChat is an online chat app for real-time conversations, photo and video sharing, and one-to-one audio and video calls. Sign in on your devices and pick up your conversations wherever you use NepaChat.</p>
+            {allowPublicSignUp && <button className="auth-seo-cta" onClick={() => { setMode('register'); setErr(''); setNotice(''); }}>Create a NepaChat account</button>}
+            <p className="auth-seo-more"><a href="/about/">Explore NepaChat features</a></p>
+          </header>
+          <section id="features" className="auth-seo-features" aria-labelledby="auth-seo-features-title">
+            <h2 id="auth-seo-features-title">What you can do with NepaChat</h2>
+            <div className="auth-seo-grid">
+              <section><h3>Chat in real time</h3><p>Send messages in one-to-one conversations and see delivery and read status.</p></section>
+              <section><h3>Share photos and videos</h3><p>Send images and video clips in your conversations, or share posts in the friends-only Activity feed.</p></section>
+              <section><h3>Make audio and video calls</h3><p>Start one-to-one calls from a chat. Video calls include camera controls and a movable mini-call window.</p></section>
+              <section><h3>Use your signed-in devices</h3><p>Sign in to the same account on multiple devices and access your server-synced chats.</p></section>
+            </div>
+          </section>
+          <section className="auth-seo-faq" aria-labelledby="auth-seo-faq-title">
+            <h2 id="auth-seo-faq-title">About NepaChat</h2>
+            <h3>What is NepaChat?</h3>
+            <p>NepaChat is a web-based messaging app with direct chat, photo and video sharing, a friends Activity feed, and one-to-one audio and video calling.</p>
+            <h3>Can I use NepaChat on more than one device?</h3>
+            <p>Yes. Sign in with the same account on another device to use your chats there. Calls require a supported browser and permission to use the camera or microphone.</p>
+            <h3>How do I get started?</h3>
+            <p>Sign in if you already have an account, or create an account and verify your email if registration is available.</p>
+          </section>
+        </article>
+      </main>
     </div>
   );
 }
