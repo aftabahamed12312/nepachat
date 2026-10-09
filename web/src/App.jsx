@@ -272,7 +272,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   );
 }
 
-function LinkedDevices({ token, onClose, onAlert }) {
+function LinkedDevices({ token, onClose }) {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -288,16 +288,6 @@ function LinkedDevices({ token, onClose, onAlert }) {
     }
   };
   useEffect(() => { refresh(); }, [token]);
-  const revokeDevice = async device => {
-    setError('');
-    try {
-      await call(`/devices/${device.id}`, token, 'DELETE');
-      setDevices(current => current.filter(item => item.id !== device.id));
-      onAlert(`${device.name} was unlinked`, 'success');
-    } catch (requestError) {
-      setError(requestError.message);
-    }
-  };
   return (
     <div className="modal linked-devices-modal" onClick={onClose}>
       <section className="sheet linked-devices-sheet" role="dialog" aria-modal="true" aria-labelledby="linked-devices-title" onClick={event => event.stopPropagation()}>
@@ -305,7 +295,7 @@ function LinkedDevices({ token, onClose, onAlert }) {
           <h3 id="linked-devices-title">Linked devices</h3>
           <button aria-label="Close linked devices" onClick={onClose}>×</button>
         </div>
-        <p className="muted">Sign in on another device with your account email or username and password. There is no limit on the number of signed-in devices.</p>
+        <p className="muted">There is no limit on signed-in devices. This list is for reference; to sign out, use that device.</p>
         {error && <p className="err">{error}</p>}
         <h4>Your devices</h4>
         {loading && <p className="muted">Loading devices…</p>}
@@ -314,7 +304,6 @@ function LinkedDevices({ token, onClose, onAlert }) {
           <div className="linked-device-row" key={device.id}>
             <div className="linked-device-icon">▣</div>
             <div className="grow"><b>{device.name}{device.current ? ' (this device)' : ''}</b><small>{device.isPrimary ? 'Primary device' : 'Companion device'} · Last active {new Date(device.lastSeenAt).toLocaleString()}</small></div>
-            {!device.current && <button className="friend-decline" onClick={() => revokeDevice(device)}>Unlink</button>}
           </div>
         ))}</div>
         <button className="btn ghost" onClick={onClose}>Done</button>
@@ -417,7 +406,7 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
           : callState.status === 'failed' || callState.status === 'error' ? 'Connection failed'
             : callState.status === 'preparing' ? 'Starting camera…' : 'Connecting…';
   const handleDragStart = event => {
-    if (event.button !== 0 || event.target.closest('button')) return;
+    if (layout === 'split' || event.button !== 0 || event.target.closest('button')) return;
     event.preventDefault();
     dragRef.current = {
       startX: event.clientX,
@@ -430,7 +419,7 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
   const panelStyle = layout === 'overlay'
     ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 }
     : layout === 'split'
-      ? { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }
+      ? {}
       : { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` };
   return (
     <div className={'call-shell call-shell-' + layout}>
@@ -2031,7 +2020,7 @@ export default function App() {
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
-    <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
+    <div className={'app' + (active || activeView === 'activity' ? ' open' : '') + (callState && callLayout === 'split' ? ' call-split' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
@@ -2233,7 +2222,7 @@ export default function App() {
         </section>
       </div>}
       {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
-      {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} onAlert={addAlert} />}
+      {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} />}
       {adminUsersOpen && <AdminUsers token={token} currentUserId={me.id} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
       {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}

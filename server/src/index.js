@@ -239,11 +239,14 @@ const ensureDeviceSession = async (user, deviceId, name) => withDeviceLock(Strin
   const existing = await deviceSessions.findOne({ _id: deviceId });
   if (existing) {
     if (existing.userId !== String(user._id)) return { error: 'This browser device ID belongs to another account.', status: 409, deviceIdConflict: true };
-    if (existing.revokedAt) return { error: 'This device session has been revoked. Link this device again.', status: 403 };
-    await deviceSessions.updateOne({ _id: deviceId }, { $set: { name, lastSeenAt: new Date() } });
-    return { device: { ...existing, name, lastSeenAt: new Date() } };
+    const lastSeenAt = new Date();
+    await deviceSessions.updateOne(
+      { _id: deviceId, userId: String(user._id) },
+      { $set: { name, lastSeenAt }, $unset: { revokedAt: '' } },
+    );
+    return { device: { ...existing, name, lastSeenAt } };
   }
-  const activeCount = await deviceSessions.countDocuments({ userId: String(user._id), revokedAt: { $exists: false } });
+  const activeCount = await deviceSessions.countDocuments({ userId: String(user._id) });
   const device = {
     _id: deviceId, userId: String(user._id), name, isPrimary: activeCount === 0,
     createdAt: new Date(), lastSeenAt: new Date(),
@@ -282,8 +285,12 @@ const auth = (req, res, next) => {
   req.uid = claims.id;
   req.deviceId = claims.did || null;
   if (!req.deviceId) return next();
-  deviceSessions.findOne({ _id: req.deviceId, userId: req.uid, revokedAt: { $exists: false } }).then(device => {
-    if (!device) return res.status(401).json({ error: 'This device was unlinked. Please sign in again.' });
+  deviceSessions.findOne({ _id: req.deviceId, userId: req.uid }).then(async device => {
+    if (!device) return res.status(401).json({ error: 'This device session is no longer available. Please sign in again.' });
+    if (device.revokedAt) {
+      await deviceSessions.updateOne({ _id: device._id, userId: req.uid }, { $unset: { revokedAt: '' } });
+      delete device.revokedAt;
+    }
     req.device = device;
     if (!device.lastSeenAt || Date.now() - device.lastSeenAt.getTime() > 5 * 60_000) {
       deviceSessions.updateOne({ _id: device._id }, { $set: { lastSeenAt: new Date() } }).catch(error => console.error('Unable to update device activity:', error));
@@ -450,7 +457,7 @@ app.post('/api/devices/current', auth, wrap(async (req, res) => {
 }));
 
 app.get('/api/devices', auth, wrap(async (req, res) => {
-  const list = await deviceSessions.find({ userId: req.uid, revokedAt: { $exists: false } }).sort({ isPrimary: -1, createdAt: 1 }).toArray();
+  const list = await deviceSessions.find({ userId: req.uid }).sort({ isPrimary: -1, createdAt: 1 }).toArray();
   res.json(list.map(device => ({
     id: device._id,
     name: device.name,
@@ -459,19 +466,6 @@ app.get('/api/devices', auth, wrap(async (req, res) => {
     createdAt: device.createdAt,
     lastSeenAt: device.lastSeenAt,
   })));
-}));
-
-app.delete('/api/devices/:id', auth, wrap(async (req, res) => {
-  if (!deviceIdRx.test(req.params.id)) return res.status(400).json({ error: 'Invalid device ID' });
-  if (req.params.id === req.deviceId) return res.status(400).json({ error: 'Use sign out to remove the current device' });
-  const result = await deviceSessions.updateOne(
-    { _id: req.params.id, userId: req.uid, revokedAt: { $exists: false } },
-    { $set: { revokedAt: new Date() } },
-  );
-  if (!result.matchedCount) return res.status(404).json({ error: 'Active device not found' });
-  await pushSubs.deleteMany({ userId: req.uid, deviceId: req.params.id });
-  io.in(`d:${req.params.id}`).disconnectSockets(true);
-  res.json({ ok: true });
 }));
 
 app.post('/api/devices/pairing', wrap(async (req, res) => {
@@ -499,7 +493,7 @@ app.post('/api/devices/pairing/:id/claim', wrap(async (req, res) => {
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return res.status(404).json({ error: 'Pairing request not found' });
   if (pairing.status !== 'approved') return res.json({ status: 'pending' });
   const user = await users.findOne({ _id: oid(pairing.userId) });
-  const device = await deviceSessions.findOne({ _id: pairing.deviceId, userId: pairing.userId, revokedAt: { $exists: false } });
+  const device = await deviceSessions.findOne({ _id: pairing.deviceId, userId: pairing.userId });
   if (!user || !device) return res.status(410).json({ error: 'This device link is no longer active' });
   res.set('Cache-Control', 'no-store');
   res.json({ status: 'approved', token: sign(user, device._id), user: accountView(user), device });
@@ -517,17 +511,16 @@ app.post('/api/devices/pairings/:id/approve', auth, wrap(async (req, res) => {
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return res.status(404).json({ error: 'Pairing request not found' });
   const result = await withDeviceLock(req.uid, async () => {
     const previous = await deviceSessions.findOne({ _id: pairing.deviceId });
-    if (previous && (previous.userId !== req.uid || !previous.revokedAt)) return { error: 'This device ID is already in use', status: 409 };
+    if (previous && previous.userId !== req.uid) return { error: 'This device ID is already in use', status: 409 };
     const device = {
       _id: pairing.deviceId, userId: req.uid, name: pairing.deviceName, isPrimary: false,
       createdAt: new Date(), lastSeenAt: new Date(),
     };
     if (previous) {
-      const restored = await deviceSessions.updateOne(
-        { _id: previous._id, userId: req.uid, revokedAt: previous.revokedAt },
+      await deviceSessions.updateOne(
+        { _id: previous._id, userId: req.uid },
         { $set: { name: device.name, lastSeenAt: device.lastSeenAt }, $unset: { revokedAt: '' } },
       );
-      if (!restored.modifiedCount) return { error: 'This device session changed. Scan the QR code again.', status: 409 };
     } else {
       await deviceSessions.insertOne(device);
     }
@@ -536,9 +529,7 @@ app.post('/api/devices/pairings/:id/approve', auth, wrap(async (req, res) => {
       { $set: { status: 'approved', userId: req.uid, approvedAt: new Date() } },
     );
     if (!approved.modifiedCount) {
-      if (previous) {
-        await deviceSessions.updateOne({ _id: previous._id, userId: req.uid }, { $set: { revokedAt: previous.revokedAt } });
-      } else {
+      if (!previous) {
         await deviceSessions.deleteOne({ _id: device._id, userId: req.uid });
       }
       return { error: 'Pairing request expired or already handled', status: 409 };
@@ -1452,7 +1443,7 @@ io.use((s, next) => {
   s.uid = claims.id;
   s.deviceId = claims.did || null;
   if (!s.deviceId) return next();
-  deviceSessions.findOne({ _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false } }).then(device => {
+  deviceSessions.findOne({ _id: s.deviceId, userId: s.uid }).then(device => {
     if (!device) return next(new Error('auth'));
     next();
   }).catch(error => {
@@ -1466,12 +1457,12 @@ io.on('connection', s => {
   let deviceCheck;
   if (s.deviceId) {
     const validateDevice = () => deviceSessions.findOne({
-      _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false },
+      _id: s.deviceId, userId: s.uid,
     }).then(device => {
       if (!device) s.disconnect(true);
     }).catch(error => console.error('Unable to revalidate socket device session:', error));
     s.use((_, next) => {
-      deviceSessions.findOne({ _id: s.deviceId, userId: s.uid, revokedAt: { $exists: false } })
+      deviceSessions.findOne({ _id: s.deviceId, userId: s.uid })
         .then(device => next(device ? undefined : new Error('auth')))
         .catch(error => {
           console.error('Unable to validate socket device event:', error);
