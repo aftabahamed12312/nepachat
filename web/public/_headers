@@ -1,0 +1,11 @@
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/about/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/sitemap.xml
+  Cache-Control: public, max-age=0, must-revalidate
+
+/robots.txt
+  Cache-Control: public, max-age=0, must-revalidate
