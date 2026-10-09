@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import { clearCachedUser, loadCachedChats, loadCachedMessages, saveCachedChats, saveCachedMessages } from './localCache.js';
 import {
   CloseOutlined,
   CommentOutlined,
@@ -20,6 +21,22 @@ import {
 
 const API = import.meta.env.VITE_API_URL || '';
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
+const getCallMediaError = (error, device = 'camera and microphone') => {
+  if (['NotAllowedError', 'PermissionDeniedError', 'SecurityError'].includes(error?.name)) return `Allow NepaChat to use your ${device} in the browser or device settings, then try again.`;
+  if (['NotFoundError', 'DevicesNotFoundError'].includes(error?.name)) return `No available ${device} was found. Connect a device and try again.`;
+  if (['NotReadableError', 'TrackStartError'].includes(error?.name)) return `Your ${device} is already in use or unavailable. Close other apps using it and try again.`;
+  if (error?.name === 'OverconstrainedError') return `Your ${device} does not support the required settings.`;
+  return error?.message || 'Unable to access the camera or microphone.';
+};
+const getCallMedia = async (constraints, device = 'camera and microphone') => {
+  if (window.isSecureContext === false) throw new Error(`${device} access requires a secure connection (HTTPS or localhost).`);
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error(`This browser cannot access the ${device}. Open NepaChat over HTTPS in a supported browser.`);
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (error) {
+    throw new Error(getCallMediaError(error, device));
+  }
+};
 const attachmentKey = file => `${file.name}-${file.size}-${file.lastModified}`;
 const mediaTypeFromFile = file => {
   const lowerName = String(file.name || '').toLowerCase();
@@ -713,6 +730,7 @@ function LocationShareDialog({ onStart, onClose }) {
 
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, emailVerificationEnabled: false, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
@@ -749,7 +767,7 @@ export default function App() {
   const [cameraFacing, setCameraFacing] = useState('user');
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   const backStateRef = useRef(null);
   const activityCommentPostRef = useRef(activityCommentPostId);
   activeRef.current = active;
@@ -759,6 +777,16 @@ export default function App() {
   backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
+  useEffect(() => {
+    const markOnline = () => setIsOnline(true);
+    const markOffline = () => setIsOnline(false);
+    window.addEventListener('online', markOnline);
+    window.addEventListener('offline', markOffline);
+    return () => {
+      window.removeEventListener('online', markOnline);
+      window.removeEventListener('offline', markOffline);
+    };
+  }, []);
   useEffect(() => {
     const preference = window.matchMedia('(prefers-color-scheme: dark)');
     const updateBrowserTheme = event => {
@@ -774,7 +802,16 @@ export default function App() {
     if (locationTimerRef.current !== null) window.clearTimeout(locationTimerRef.current);
     locationWatchRef.current = null; locationTimerRef.current = null;
   };
-  const logout = () => { stopLocationTracking(); localStorage.removeItem('nepa'); setAuth(null); setChats([]); setActive(null); setLocationShares([]); };
+  const logout = () => {
+    stopLocationTracking();
+    if (me?.id) clearCachedUser(me.id).catch(error => console.error('Unable to clear this account’s local cache:', error));
+    localStorage.removeItem('nepa');
+    setAuth(null);
+    setChats([]);
+    setMessages([]);
+    setActive(null);
+    setLocationShares([]);
+  };
   const onAuth = d => { localStorage.setItem('nepa', JSON.stringify(d)); setAuth(d); };
   const onProfileUpdated = user => setAuth(current => {
     if (!current) return current;
@@ -783,6 +820,16 @@ export default function App() {
     return updated;
   });
   const refreshFriendData = () => call('/friends', token).then(setFriendData);
+
+  useEffect(() => {
+    if (!me?.id || !chats.length) return;
+    saveCachedChats(me.id, chats).catch(error => console.error('Unable to save chats to the local cache:', error));
+  }, [chats, me?.id]);
+
+  useEffect(() => {
+    if (!me?.id || !active?.id || messageChatIdRef.current !== active.id || !messages.length) return;
+    saveCachedMessages(me.id, active.id, messages).catch(error => console.error('Unable to save messages to the local cache:', error));
+  }, [active?.id, me?.id, messages]);
 
   useEffect(() => {
     if (!token || !me?.id) return;
@@ -1089,18 +1136,18 @@ export default function App() {
         console.warn('Unable to enumerate cameras; trying the requested facing mode:', error);
       }
       try {
-        replacement = await navigator.mediaDevices.getUserMedia({
+        replacement = await getCallMedia({
           audio: false,
           video: targetDevice
             ? { deviceId: { exact: targetDevice.deviceId } }
             : { facingMode: { ideal: targetFacing } },
-        });
+        }, 'camera');
       } catch (deviceError) {
         replacement?.getTracks().forEach(track => track.stop());
-        replacement = await navigator.mediaDevices.getUserMedia({
+        replacement = await getCallMedia({
           audio: false,
           video: { facingMode: { ideal: targetFacing } },
-        });
+        }, 'camera');
         if (replacement.getVideoTracks()[0]?.getSettings().deviceId === oldTrack.getSettings().deviceId) {
           throw new Error(deviceError.message || 'A different camera is not available on this device.');
         }
@@ -1121,9 +1168,7 @@ export default function App() {
       replacement?.getTracks().forEach(track => track.stop());
       setCallState(value => value ? {
         ...value,
-        error: error.name === 'NotAllowedError'
-          ? 'Allow camera access to switch cameras.'
-          : error.message || 'Unable to switch camera on this device.',
+        error: error.message || 'Unable to switch camera on this device.',
       } : value);
     } finally {
       setCameraSwitching(false);
@@ -1133,8 +1178,10 @@ export default function App() {
   const startCall = async kind => {
     if (!active || !socketRef.current || callRef.current) return;
     try {
+      if (kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
@@ -1147,7 +1194,7 @@ export default function App() {
       socketRef.current.emit('call:invite', { chatId: current.chatId, callId: current.callId, kind, offer: peer.localDescription });
     } catch (error) {
       clearCall();
-      setCallState({ peerName: '@' + active.other.username, kind, status: 'error', error: error.name === 'NotAllowedError' ? 'Allow camera and microphone access to place a call.' : error.message || 'Unable to start the call.' });
+      setCallState({ peerName: '@' + active.other.username, kind, status: 'error', error: error.message || 'Unable to start the call.' });
     }
   };
 
@@ -1155,8 +1202,10 @@ export default function App() {
     const current = callRef.current;
     if (!current?.incoming) return;
     try {
+      if (current.kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
       const { iceServers } = await call('/calls/ice-servers', token);
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
@@ -1172,7 +1221,7 @@ export default function App() {
       const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
       socketRef.current.emit('call:signal', { chatId: current.chatId, callId: current.callId, signal: { type: 'answer', sdp: peer.localDescription } });
     } catch (error) {
-      setCallState(c => c ? { ...c, error: error.name === 'NotAllowedError' ? 'Allow camera and microphone access to answer.' : error.message || 'Unable to answer the call.' } : c);
+      setCallState(c => c ? { ...c, error: error.message || 'Unable to answer the call.' } : c);
     }
   };
 
@@ -1221,16 +1270,32 @@ export default function App() {
       localStorage.setItem('nepa', JSON.stringify(updated));
       return updated;
     })).catch(e => e.status === 401 && logout());
-    call('/chats', token).then(list => {
-      setChats(list);
-      const chatId = new URLSearchParams(window.location.search).get('chat');
-      const targetChat = chatId && list.find(item => item.id === chatId);
-      if (targetChat) {
-        setActiveView('chats');
-        setActive(targetChat);
-        history.replaceState(null, '', window.location.pathname);
+    let current = true;
+    const loadChats = async () => {
+      try {
+        const cached = await loadCachedChats(me.id);
+        if (current && Array.isArray(cached)) setChats(cached);
+      } catch (error) {
+        console.error('Unable to load chats from the local cache:', error);
       }
-    }).catch(e => e.status === 401 && logout());
+      try {
+        const list = await call('/chats', token);
+        if (!current) return;
+        setChats(list);
+        saveCachedChats(me.id, list).catch(error => console.error('Unable to save chats to the local cache:', error));
+        const chatId = new URLSearchParams(window.location.search).get('chat');
+        const targetChat = chatId && list.find(item => item.id === chatId);
+        if (targetChat) {
+          setActiveView('chats');
+          setActive(targetChat);
+          history.replaceState(null, '', window.location.pathname);
+        }
+      } catch (error) {
+        if (error.status === 401) logout();
+        else console.error('Unable to refresh chats:', error);
+      }
+    };
+    loadChats();
     window.addEventListener('focus', refreshVisibleData);
     document.addEventListener('visibilitychange', refreshWhenVisible);
     const s = io(API || undefined, { auth: { token } });
@@ -1341,6 +1406,7 @@ export default function App() {
     });
     s.on('call:ended', ({ callId }) => { if (callRef.current?.callId === callId) clearCall(); });
     return () => {
+      current = false;
       window.removeEventListener('focus', refreshVisibleData);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       s.io.off('reconnect', refreshVisibleData);
@@ -1403,18 +1469,35 @@ export default function App() {
   }, [activeView, friendPanel, friendQuery, token]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !token || !me?.id) return;
+    let current = true;
+    messageChatIdRef.current = active.id;
     setMessages([]);
-    call(`/chats/${active.id}/messages`, token).then(list => {
-      setMessages(list);
-      for (const message of list) {
-        if (message.from === me.id) continue;
-        socketRef.current?.emit('message:delivered', { chatId: active.id, messageId: message.id });
-        socketRef.current?.emit('message:read', { chatId: active.id, messageId: message.id });
+    const loadMessages = async () => {
+      try {
+        const cached = await loadCachedMessages(me.id, active.id);
+        if (current && messageChatIdRef.current === active.id && Array.isArray(cached)) setMessages(cached);
+      } catch (error) {
+        console.error(`Unable to load cached messages for chat ${active.id}:`, error);
       }
-    }).catch(() => {});
+      try {
+        const list = await call(`/chats/${active.id}/messages`, token);
+        if (!current || messageChatIdRef.current !== active.id) return;
+        setMessages(list);
+        saveCachedMessages(me.id, active.id, list).catch(error => console.error('Unable to save messages to the local cache:', error));
+        for (const message of list) {
+          if (message.from === me.id) continue;
+          socketRef.current?.emit('message:delivered', { chatId: active.id, messageId: message.id });
+          socketRef.current?.emit('message:read', { chatId: active.id, messageId: message.id });
+        }
+      } catch (error) {
+        if (current) console.error(`Unable to refresh messages for chat ${active.id}:`, error);
+      }
+    };
+    loadMessages();
     call(`/chats/${active.id}/location-shares`, token).then(shares => setLocationShares(current => [...current.filter(item => item.chatId !== active.id), ...shares])).catch(() => {});
-  }, [active?.id]);
+    return () => { current = false; };
+  }, [active?.id, token, me?.id]);
   useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
 
   const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActive(c); };
@@ -1684,6 +1767,7 @@ export default function App() {
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
         <small>@{me.username}</small>
+        {!isOnline && <small className="offline-indicator" role="status" title="Showing saved chats and messages">Offline</small>}
         <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}>⚙</button>
         {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}

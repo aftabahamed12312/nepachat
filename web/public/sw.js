@@ -1,4 +1,4 @@
-const CACHE = 'nepachat-shell-v2';
+const CACHE = 'nepachat-shell-v3';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', event => {
@@ -7,7 +7,7 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))));
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('nepachat-shell-') && key !== CACHE).map(key => caches.delete(key)))));
   self.clients.claim();
 });
 
@@ -16,16 +16,19 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api') || url.pathname.startsWith('/socket.io')) return;
   if (request.mode === 'navigate') {
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok) caches.open(CACHE).then(cache => cache.put('/', response.clone()));
+    event.respondWith(caches.open(CACHE).then(cache => fetch(request).then(async response => {
+      if (response.ok) await cache.put('/', response.clone());
       return response;
-    }).catch(() => caches.match('/')));
+    }).catch(() => cache.match('/'))));
     return;
   }
-  event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => {
-    if (response.ok) caches.open(CACHE).then(cache => cache.put(request, response.clone()));
+  event.respondWith(caches.open(CACHE).then(async cache => {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    const response = await fetch(request);
+    if (response.ok) await cache.put(request, response.clone());
     return response;
-  })));
+  }));
 });
 
 self.addEventListener('push', event => {
