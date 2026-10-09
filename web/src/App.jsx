@@ -825,6 +825,7 @@ export default function App() {
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const callAudioContextRef = useRef(null), callToneRef = useRef(null), connectedToneCallRef = useRef('');
   const backStateRef = useRef(null);
   const activityCommentPostRef = useRef(activityCommentPostId);
   activeRef.current = active;
@@ -834,6 +835,108 @@ export default function App() {
   backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
+  const prepareCallAudio = () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    try {
+      const context = callAudioContextRef.current || new AudioContextClass();
+      callAudioContextRef.current = context;
+      if (context.state === 'suspended') context.resume().catch(error => console.warn('Unable to enable call sounds:', error));
+      return context;
+    } catch (error) {
+      console.warn('Unable to initialize call sounds:', error);
+      return null;
+    }
+  };
+  const stopCallTone = () => {
+    const tone = callToneRef.current;
+    if (!tone) return;
+    window.clearInterval(tone.timer);
+    tone.oscillators.forEach(oscillator => {
+      try { oscillator.stop(); } catch {}
+      oscillator.disconnect();
+    });
+    tone.gain.disconnect();
+    callToneRef.current = null;
+  };
+  const startCallTone = incoming => {
+    stopCallTone();
+    const context = prepareCallAudio();
+    if (!context) return;
+    const gain = context.createGain();
+    const oscillators = [440, 480].map(frequency => {
+      const oscillator = context.createOscillator();
+      oscillator.frequency.value = frequency;
+      oscillator.connect(gain);
+      oscillator.start();
+      return oscillator;
+    });
+    gain.gain.value = 0;
+    gain.connect(context.destination);
+    const onDuration = incoming ? 900 : 2000;
+    const offDuration = incoming ? 1800 : 4000;
+    const cycleDuration = onDuration + offDuration;
+    const startedAt = Date.now();
+    let wasOn = false;
+    const updateTone = () => {
+      if (context.state !== 'running') return;
+      const shouldBeOn = (Date.now() - startedAt) % cycleDuration < onDuration;
+      if (shouldBeOn === wasOn) return;
+      wasOn = shouldBeOn;
+      const now = context.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setTargetAtTime(shouldBeOn ? 0.07 : 0, now, 0.025);
+    };
+    const timer = window.setInterval(updateTone, 100);
+    callToneRef.current = { gain, oscillators, timer };
+    updateTone();
+  };
+  const playConnectedTone = () => {
+    stopCallTone();
+    const context = prepareCallAudio();
+    if (!context || context.state !== 'running') return;
+    const now = context.currentTime;
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.075, now + 0.025);
+    gain.gain.setValueAtTime(0.075, now + 0.13);
+    gain.gain.linearRampToValueAtTime(0, now + 0.2);
+    gain.connect(context.destination);
+    const oscillator = context.createOscillator();
+    oscillator.frequency.setValueAtTime(660, now);
+    oscillator.frequency.setValueAtTime(880, now + 0.1);
+    oscillator.connect(gain);
+    oscillator.start(now);
+    oscillator.stop(now + 0.21);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      gain.disconnect();
+    };
+  };
+  useEffect(() => {
+    if (!callState) {
+      stopCallTone();
+      connectedToneCallRef.current = '';
+      return;
+    }
+    if (callState.status === 'incoming') {
+      startCallTone(true);
+      return;
+    }
+    if (callState.status === 'calling') {
+      startCallTone(false);
+      return;
+    }
+    stopCallTone();
+    if (callState.status === 'active' && connectedToneCallRef.current !== callState.callId) {
+      connectedToneCallRef.current = callState.callId;
+      playConnectedTone();
+    }
+  }, [callState?.callId, callState?.status, callState?.incoming]);
+  useEffect(() => () => {
+    stopCallTone();
+    callAudioContextRef.current?.close().catch(error => console.warn('Unable to close call audio:', error));
+  }, []);
   useEffect(() => {
     const markOnline = () => setIsOnline(true);
     const markOffline = () => setIsOnline(false);
@@ -1255,6 +1358,7 @@ export default function App() {
 
   const startCall = async kind => {
     if (!active || !socketRef.current || callRef.current) return;
+    prepareCallAudio();
     const current = {
       chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id,
       peerName: '@' + active.other.username, kind, status: 'preparing',
@@ -1319,6 +1423,7 @@ export default function App() {
   const acceptCall = async () => {
     const current = callRef.current;
     if (!current?.incoming) return;
+    prepareCallAudio();
     const preparing = { ...current, incoming: false, status: 'preparing', error: '' };
     callRef.current = preparing;
     setCallState(preparing);
