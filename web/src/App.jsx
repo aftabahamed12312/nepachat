@@ -211,6 +211,20 @@ const getDeviceName = () => {
   return `${platform} browser`;
 };
 
+function PasswordField({ label, value, onChange, autoComplete, minLength, required = false, disabled = false }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <label>{label}
+      <span className="password-control">
+        <input type={visible ? 'text' : 'password'} value={value} onChange={onChange} autoComplete={autoComplete} minLength={minLength} required={required} disabled={disabled} />
+        <button type="button" className="password-visibility" aria-label={visible ? 'Hide password' : 'Show password'} aria-pressed={visible} onClick={() => setVisible(current => !current)} disabled={disabled}>
+          {visible ? 'Hide' : 'Show'}
+        </button>
+      </span>
+    </label>
+  );
+}
+
 function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   const [mode, setMode] = useState('login');
   const [f, setF] = useState({ username: '', email: '', password: '' });
@@ -259,7 +273,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
           <label>{mode === 'login' ? 'Email or username' : 'Email address'}<input type={mode === 'login' ? 'text' : 'email'} value={f.email} onChange={set('email')} placeholder="you@example.com" autoComplete={mode === 'login' ? 'username' : 'email'} required /></label>
           {mode === 'register' && awaitingCode
             ? <label>6-digit verification code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required /></label>
-            : <label>Password<input type="password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>}
+            : <PasswordField label="Password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required />}
           {err && <div className="err">{err}</div>}
           {notice && <div className="notice">{notice}</div>}
           {mode === 'register' && !awaitingCode && !emailVerificationEnabled && <div className="err">Email verification is not configured on the server. Ask the administrator to set up an email provider.</div>}
@@ -618,7 +632,7 @@ function AdminCreateUser({ token, onClose }) {
         <h3>Create account</h3>
         <label>Username<input value={fields.username} onChange={set('username')} autoComplete="off" minLength={3} maxLength={20} required /></label>
         <label>Email<input type="email" value={fields.email} onChange={set('email')} autoComplete="off" required /></label>
-        <label>Temporary password<input type="password" value={fields.password} onChange={set('password')} minLength={8} autoComplete="new-password" required /></label>
+        <PasswordField label="Temporary password" value={fields.password} onChange={set('password')} minLength={8} autoComplete="new-password" required />
         {error && <div className="err">{error}</div>}
         {notice && <div className="notice">{notice}</div>}
         <button className="btn" type="submit">Create account</button>
@@ -810,8 +824,8 @@ function ProfileSettings({ me, token, onClose, onUpdated }) {
         <label>Username<input value={username} onChange={event => setUsername(event.target.value)} minLength={3} maxLength={20} required disabled={saving} /></label>
         <label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)} required disabled={saving} /></label>
         <p className="muted profile-password-note">Leave password fields empty to keep your current password.</p>
-        <label>Current password<input type="password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} autoComplete="current-password" disabled={saving} /></label>
-        <label>New password<input type="password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={8} autoComplete="new-password" disabled={saving} /></label>
+        <PasswordField label="Current password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} autoComplete="current-password" disabled={saving} />
+        <PasswordField label="New password" value={newPassword} onChange={event => setNewPassword(event.target.value)} minLength={8} autoComplete="new-password" disabled={saving} />
         {error && <p className="err">{error}</p>}
         {notice && <p className="notice">{notice}</p>}
         <button className="btn" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
