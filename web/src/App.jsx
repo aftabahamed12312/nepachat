@@ -34,6 +34,13 @@ const getCallMedia = async (constraints, device = 'camera and microphone') => {
   try {
     return await navigator.mediaDevices.getUserMedia(constraints);
   } catch (error) {
+    if (constraints.video && constraints.audio && typeof constraints.audio === 'object') {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ audio: false, video: constraints.video });
+      } catch {
+        // Keep the original combined-request error if video-only access fails too.
+      }
+    }
     throw new Error(getCallMediaError(error, device));
   }
 };
@@ -266,7 +273,7 @@ function LinkedDevices({ token, onClose, onAlert }) {
           <h3 id="linked-devices-title">Linked devices</h3>
           <button aria-label="Close linked devices" onClick={onClose}>×</button>
         </div>
-        <p className="muted">Sign in on another device with your account email or username and password. You can use NepaChat on up to four companion devices.</p>
+        <p className="muted">Sign in on another device with your account email or username and password. There is no limit on the number of signed-in devices.</p>
         {error && <p className="err">{error}</p>}
         <h4>Your devices</h4>
         {loading && <p className="muted">Loading devices…</p>}
@@ -290,8 +297,25 @@ function CallPanel({ callState, localStream, remoteStream, peerConnection, audio
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [networkQuality, setNetworkQuality] = useState('Connecting');
   const dragRef = useRef(null);
-  useEffect(() => { if (localRef.current) localRef.current.srcObject = localStream || null; }, [localStream]);
-  useEffect(() => { if (remoteRef.current) remoteRef.current.srcObject = remoteStream || null; }, [remoteStream]);
+  useEffect(() => {
+    const video = localRef.current;
+    if (!video) return;
+    video.srcObject = localStream || null;
+    if (!localStream) return;
+    let current = true;
+    video.play().catch(error => {
+      if (!current) return;
+      console.error('Unable to start local camera preview:', error);
+      setCallState(call => call ? { ...call, error: 'Camera is active, but the browser could not play the local preview. Check camera permission and try again.' } : call);
+    });
+    return () => { current = false; };
+  }, [localStream, videoEnabled, setCallState]);
+  useEffect(() => {
+    const video = remoteRef.current;
+    if (!video) return;
+    video.srcObject = remoteStream || null;
+    if (remoteStream) video.play().catch(error => console.error('Unable to play remote call media:', error));
+  }, [remoteStream]);
   useEffect(() => {
     if (!peerConnection) {
       setNetworkQuality('Connecting');
@@ -1045,18 +1069,39 @@ export default function App() {
   const attachPeer = (peer, current) => {
     peerRef.current = peer;
     setPeerConnection(peer);
-    peer.ontrack = event => setRemoteStream(event.streams[0]);
+    peer.ontrack = event => {
+      const stream = event.streams[0] || new MediaStream([event.track]);
+      setRemoteStream(current => {
+        if (current?.id === stream.id) return current;
+        if (event.streams[0]) return stream;
+        const combined = current || new MediaStream();
+        if (!combined.getTracks().some(track => track.id === event.track.id)) combined.addTrack(event.track);
+        return combined;
+      });
+    };
     peer.onicecandidate = event => {
       if (event.candidate) socketRef.current?.emit('call:signal', { chatId: current.chatId, callId: current.callId, signal: { type: 'candidate', candidate: event.candidate.toJSON() } });
     };
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') setCallState(c => c ? { ...c, status: 'active' } : c);
-      if (peer.connectionState === 'failed') setCallState(c => c ? { ...c, error: 'Connection failed. Check your network or TURN server settings.' } : c);
+      if (peer.connectionState === 'failed') setCallState(c => c ? {
+        ...c,
+        status: 'failed',
+        error: c.hasTurnServer
+          ? 'Connection failed. Check your network or TURN server configuration.'
+          : 'Connection failed. No TURN relay is configured, so calls may not work across restrictive networks. Configure TURN_KEY_ID and TURN_API_TOKEN.',
+      } : c);
     };
     peer.oniceconnectionstatechange = () => {
       if (peer.iceConnectionState === 'disconnected') setCallState(c => c ? { ...c, status: 'reconnecting' } : c);
       if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') setCallState(c => c ? { ...c, status: 'active' } : c);
-      if (peer.iceConnectionState === 'failed') setCallState(c => c ? { ...c, status: 'failed', error: 'Could not connect. Check your network or TURN server settings, then try calling again.' } : c);
+      if (peer.iceConnectionState === 'failed') setCallState(c => c ? {
+        ...c,
+        status: 'failed',
+        error: c.hasTurnServer
+          ? 'Could not connect through the available ICE servers. Check your network or TURN configuration.'
+          : 'Could not connect. This server has no TURN relay configured; set TURN_KEY_ID and TURN_API_TOKEN to allow calls across restrictive networks.',
+      } : c);
     };
   };
 
@@ -1181,14 +1226,26 @@ export default function App() {
       if (kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
       const { iceServers } = await call('/calls/ice-servers', token);
+      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
       const stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
+      const videoTrack = stream.getVideoTracks()[0];
+      if (kind === 'video' && (!videoTrack || videoTrack.readyState !== 'live')) {
+        stream.getTracks().forEach(track => track.stop());
+        throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
+      }
       if (kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
-      const current = { chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id, peerName: '@' + active.other.username, kind, status: 'calling' };
-      const peer = new RTCPeerConnection({ iceServers });
+      const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
+      const current = {
+        chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id,
+        peerName: '@' + active.other.username, kind, status: 'calling', hasTurnServer,
+        error: kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
+      };
+      const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
       callRef.current = current; setCallState(current); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
+      setAudioEnabled(Boolean(stream.getAudioTracks().length));
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
       socketRef.current.emit('call:invite', { chatId: current.chatId, callId: current.callId, kind, offer: peer.localDescription });
@@ -1205,14 +1262,25 @@ export default function App() {
       if (current.kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
       const { iceServers } = await call('/calls/ice-servers', token);
+      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
       const stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
+      const videoTrack = stream.getVideoTracks()[0];
+      if (current.kind === 'video' && (!videoTrack || videoTrack.readyState !== 'live')) {
+        stream.getTracks().forEach(track => track.stop());
+        throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
+      }
       if (current.kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
-      const peer = new RTCPeerConnection({ iceServers });
-      const connecting = { ...current, incoming: false, status: 'connecting' };
+      const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
+      const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
+      const connecting = {
+        ...current, incoming: false, status: 'connecting', hasTurnServer,
+        error: current.kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
+      };
       callRef.current = connecting; setCallState(connecting); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
+      setAudioEnabled(Boolean(stream.getAudioTracks().length));
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       await peer.setRemoteDescription(current.offer);
       const candidates = pendingCandidatesRef.current.filter(item => item.callId === current.callId);
@@ -1388,20 +1456,29 @@ export default function App() {
       if (callRef.current?.callId === callId && callRef.current.incoming) clearCall();
     });
     s.on('call:signal', async ({ callId, signal }) => {
-      if (signal.type === 'candidate' && !callRef.current) {
-        if (pendingCandidatesRef.current.length < 64) pendingCandidatesRef.current.push({ callId, candidate: signal.candidate });
-        return;
-      }
-      if (callRef.current?.callId !== callId) return;
-      const peer = peerRef.current;
-      if (signal.type === 'answer' && peer) {
-        await peer.setRemoteDescription(signal.sdp);
-        const candidates = pendingCandidatesRef.current.filter(item => item.callId === callId);
-        pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId !== callId);
-        for (const item of candidates) await peer.addIceCandidate(item.candidate);
-      } else if (signal.type === 'candidate') {
-        if (peer?.remoteDescription) await peer.addIceCandidate(signal.candidate);
-        else if (pendingCandidatesRef.current.length < 64) pendingCandidatesRef.current.push({ callId, candidate: signal.candidate });
+      try {
+        if (signal.type === 'candidate' && !callRef.current) {
+          if (pendingCandidatesRef.current.length < 64) pendingCandidatesRef.current.push({ callId, candidate: signal.candidate });
+          return;
+        }
+        if (callRef.current?.callId !== callId) return;
+        const peer = peerRef.current;
+        if (signal.type === 'answer' && peer) {
+          await peer.setRemoteDescription(signal.sdp);
+          const candidates = pendingCandidatesRef.current.filter(item => item.callId === callId);
+          pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId !== callId);
+          for (const item of candidates) await peer.addIceCandidate(item.candidate);
+        } else if (signal.type === 'candidate') {
+          if (peer?.remoteDescription) await peer.addIceCandidate(signal.candidate);
+          else if (pendingCandidatesRef.current.length < 64) pendingCandidatesRef.current.push({ callId, candidate: signal.candidate });
+        }
+      } catch (error) {
+        console.error(`Unable to process call signaling for ${callId}:`, error);
+        setCallState(current => current ? {
+          ...current,
+          status: 'failed',
+          error: 'Call negotiation failed while exchanging connection details. End the call and try again.',
+        } : current);
       }
     });
     s.on('call:ended', ({ callId }) => { if (callRef.current?.callId === callId) clearCall(); });

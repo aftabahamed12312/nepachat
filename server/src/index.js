@@ -235,7 +235,7 @@ const withDeviceLock = async (userId, action) => {
     await users.updateOne({ _id: oid(userId), deviceLinkLockUntil: lockUntil }, { $unset: { deviceLinkLockUntil: '' } });
   }
 };
-const ensureDeviceSession = async (user, deviceId, name, allowAdditional = false) => withDeviceLock(String(user._id), async () => {
+const ensureDeviceSession = async (user, deviceId, name) => withDeviceLock(String(user._id), async () => {
   const existing = await deviceSessions.findOne({ _id: deviceId });
   if (existing) {
     if (existing.userId !== String(user._id)) return { error: 'This browser device ID belongs to another account.', status: 409, deviceIdConflict: true };
@@ -244,11 +244,6 @@ const ensureDeviceSession = async (user, deviceId, name, allowAdditional = false
     return { device: { ...existing, name, lastSeenAt: new Date() } };
   }
   const activeCount = await deviceSessions.countDocuments({ userId: String(user._id), revokedAt: { $exists: false } });
-  if (!allowAdditional && activeCount > 0) return { error: 'Link this device by scanning the QR code from an existing signed-in device.', status: 403, deviceLinkRequired: true };
-  if (activeCount >= 5) return { error: 'This account already has five active devices. Remove one before adding another.', status: 409 };
-  if (activeCount > 0 && await deviceSessions.countDocuments({ userId: String(user._id), isPrimary: false, revokedAt: { $exists: false } }) >= 4) {
-    return { error: 'This account already has four companion devices. Unlink one before adding another.', status: 409 };
-  }
   const device = {
     _id: deviceId, userId: String(user._id), name, isPrimary: activeCount === 0,
     createdAt: new Date(), lastSeenAt: new Date(),
@@ -265,12 +260,11 @@ const deviceInput = (body, res) => {
   }
   return { id, name };
 };
-const loginWithDevice = async (res, user, device, allowAdditional = false) => {
-  const result = await ensureDeviceSession(user, device.id, device.name, allowAdditional);
+const loginWithDevice = async (res, user, device) => {
+  const result = await ensureDeviceSession(user, device.id, device.name);
   if (result.error) {
     return res.status(result.status).json({
       error: result.error,
-      ...(result.deviceLinkRequired && { deviceLinkRequired: true }),
       ...(result.deviceIdConflict && { deviceIdConflict: true }),
     });
   }
@@ -438,7 +432,7 @@ app.post('/api/login', wrap(async (req, res) => {
   const id = String(req.body.email || '').trim().toLowerCase().replace(/^@/, '');
   const u = await users.findOne(id.includes('@') ? { email: id } : { username: id });
   if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.hash))) return res.status(401).json({ error: 'Wrong email/username or password' });
-  await loginWithDevice(res, u, device, true);
+  await loginWithDevice(res, u, device);
 }));
 
 app.post('/api/devices/current', auth, wrap(async (req, res) => {
@@ -450,7 +444,7 @@ app.post('/api/devices/current', auth, wrap(async (req, res) => {
     if (req.deviceId !== device.id) return res.status(409).json({ error: 'The signed-in device ID does not match this browser' });
     return res.json({ device: req.device });
   }
-  const result = await ensureDeviceSession(user, device.id, device.name, !req.deviceId);
+  const result = await ensureDeviceSession(user, device.id, device.name);
   if (result.error) return res.status(result.status).json({ error: result.error });
   res.json({ token: sign(user, device.id), user: accountView(user), device: result.device });
 }));
@@ -522,12 +516,8 @@ app.post('/api/devices/pairings/:id/approve', auth, wrap(async (req, res) => {
   const supplied = Buffer.from(devicePairHash(secret), 'hex');
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return res.status(404).json({ error: 'Pairing request not found' });
   const result = await withDeviceLock(req.uid, async () => {
-    const activeCount = await deviceSessions.countDocuments({ userId: req.uid, revokedAt: { $exists: false } });
-    if (activeCount >= 5) return { error: 'This account already has five active devices. Remove one before adding another.', status: 409 };
     const previous = await deviceSessions.findOne({ _id: pairing.deviceId });
     if (previous && (previous.userId !== req.uid || !previous.revokedAt)) return { error: 'This device ID is already in use', status: 409 };
-    const companionCount = await deviceSessions.countDocuments({ userId: req.uid, isPrimary: false, revokedAt: { $exists: false } });
-    if (companionCount >= 4) return { error: 'This account already has four companion devices. Unlink one before adding another.', status: 409 };
     const device = {
       _id: pairing.deviceId, userId: req.uid, name: pairing.deviceName, isPrimary: false,
       createdAt: new Date(), lastSeenAt: new Date(),
@@ -862,7 +852,10 @@ app.get('/api/calls/ice-servers', auth, wrap(async (_, res) => {
     });
     return;
   }
-  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+  const iceServers = [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+  ];
   if (TURN_URL && TURN_USERNAME && TURN_CREDENTIAL) iceServers.push({
     urls: TURN_URL.split(',').map(url => url.trim()), username: TURN_USERNAME, credential: TURN_CREDENTIAL,
   });
