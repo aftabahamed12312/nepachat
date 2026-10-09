@@ -316,6 +316,8 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
   const localRef = useRef(), remoteRef = useRef();
   const panelRef = useRef();
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [splitPosition, setSplitPosition] = useState(null);
+  const [splitViewport, setSplitViewport] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [networkQuality, setNetworkQuality] = useState('Connecting');
   const dragRef = useRef(null);
   useEffect(() => {
@@ -384,6 +386,20 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
       const rect = dragRef.current.rect;
       const deltaX = event.clientX - dragRef.current.startX;
       const deltaY = event.clientY - dragRef.current.startY;
+      if (dragRef.current.layout === 'split') {
+        const viewport = window.visualViewport;
+        const left = viewport?.offsetLeft || 0;
+        const top = viewport?.offsetTop || 0;
+        const width = viewport?.width || window.innerWidth;
+        const height = viewport?.height || window.innerHeight;
+        const maxX = left + width - rect.width - 8;
+        const maxY = top + height - rect.height - 8;
+        setSplitPosition({
+          x: Math.max(left + 8, Math.min(maxX, dragRef.current.offsetX + deltaX)),
+          y: Math.max(top + 8, Math.min(maxY, dragRef.current.offsetY + deltaY)),
+        });
+        return;
+      }
       const nextX = dragRef.current.offsetX + Math.min(window.innerWidth - rect.right, Math.max(-rect.left, deltaX));
       const nextY = dragRef.current.offsetY + Math.min(window.innerHeight - rect.bottom, Math.max(-rect.top, deltaY));
       setDragOffset({ x: nextX, y: nextY });
@@ -398,6 +414,41 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
       window.removeEventListener('pointercancel', onPointerUp);
     };
   }, []);
+  useEffect(() => {
+    if (layout !== 'split') {
+      setSplitPosition(null);
+      return undefined;
+    }
+    const updateViewport = () => {
+      const viewport = window.visualViewport;
+      const bounds = {
+        left: viewport?.offsetLeft || 0,
+        top: viewport?.offsetTop || 0,
+        width: viewport?.width || window.innerWidth,
+        height: viewport?.height || window.innerHeight,
+      };
+      setSplitViewport(bounds);
+      const rect = panelRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setSplitPosition(current => {
+        const x = current?.x ?? bounds.left + bounds.width - rect.width - 16;
+        const y = current?.y ?? bounds.top + bounds.height - rect.height - 16;
+        return {
+          x: Math.max(bounds.left + 8, Math.min(bounds.left + bounds.width - rect.width - 8, x)),
+          y: Math.max(bounds.top + 8, Math.min(bounds.top + bounds.height - rect.height - 8, y)),
+        };
+      });
+    };
+    updateViewport();
+    window.addEventListener('resize', updateViewport);
+    window.visualViewport?.addEventListener('resize', updateViewport);
+    window.visualViewport?.addEventListener('scroll', updateViewport);
+    return () => {
+      window.removeEventListener('resize', updateViewport);
+      window.visualViewport?.removeEventListener('resize', updateViewport);
+      window.visualViewport?.removeEventListener('scroll', updateViewport);
+    };
+  }, [layout]);
   if (!callState) return null;
   const label = callState.incoming ? `Incoming ${callState.kind} call`
     : callState.status === 'calling' ? 'Calling…'
@@ -406,25 +457,37 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
           : callState.status === 'failed' || callState.status === 'error' ? 'Connection failed'
             : callState.status === 'preparing' ? 'Starting camera…' : 'Connecting…';
   const handleDragStart = event => {
-    if (layout === 'split' || event.button !== 0 || event.target.closest('button')) return;
+    if (event.button !== 0 || event.target.closest('button')) return;
     event.preventDefault();
+    const rect = panelRef.current.getBoundingClientRect();
     dragRef.current = {
+      layout,
       startX: event.clientX,
       startY: event.clientY,
-      offsetX: dragOffset.x,
-      offsetY: dragOffset.y,
-      rect: panelRef.current.getBoundingClientRect(),
+      offsetX: layout === 'split' ? splitPosition?.x ?? rect.left : dragOffset.x,
+      offsetY: layout === 'split' ? splitPosition?.y ?? rect.top : dragOffset.y,
+      rect,
     };
   };
   const panelStyle = layout === 'overlay'
     ? { position: 'fixed', left: '50%', top: '50%', transform: `translate(-50%, -50%) translate(${dragOffset.x}px, ${dragOffset.y}px)`, zIndex: 12 }
     : layout === 'split'
-      ? {}
+      ? {
+        position: 'absolute',
+        left: splitPosition?.x ?? undefined,
+        top: splitPosition?.y ?? undefined,
+        right: splitPosition ? undefined : 12,
+        bottom: splitPosition ? undefined : 12,
+        width: 'min(360px, calc(100vw - 24px))',
+        height: `${Math.max(160, Math.min(380, splitViewport.height - 16))}px`,
+        maxHeight: `${Math.max(160, splitViewport.height - 16)}px`,
+        zIndex: 12,
+      }
       : { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` };
   return (
     <div className={'call-shell call-shell-' + layout}>
       <section ref={panelRef} className="call-panel" aria-label="Call" style={panelStyle} onPointerDown={handleDragStart}>
-        <header>
+        <header onPointerDown={handleDragStart}>
           <div><b>{callState.peerName}</b><small>{label}</small></div>
           {!callState.incoming && <div className="call-layout-actions">
             {layout !== 'minimized' && <button className="call-action" title="Minimize call" aria-label="Minimize call" onClick={() => onLayoutChange('minimized')}>−</button>}
@@ -2020,7 +2083,7 @@ export default function App() {
   const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
-    <div className={'app' + (active || activeView === 'activity' ? ' open' : '') + (callState && callLayout === 'split' ? ' call-split' : '')}>
+    <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
