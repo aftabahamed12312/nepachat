@@ -844,12 +844,11 @@ app.get('/api/calls/ice-servers', auth, wrap(async (_, res) => {
       return res.status(503).json({ error: 'Call relay is temporarily unavailable' });
     }
     const { iceServers } = await response.json();
-    res.set('Cache-Control', 'no-store').json({
-      iceServers: iceServers.map(server => ({
-        ...server,
-        urls: Array.isArray(server.urls) ? server.urls.filter(url => !/:53(?:\?|$)/.test(url)) : server.urls,
-      })),
-    });
+    if (!Array.isArray(iceServers) || !iceServers.length) {
+      console.error('Cloudflare TURN credentials response did not contain ICE servers');
+      return res.status(503).json({ error: 'Call relay returned no ICE servers' });
+    }
+    res.set('Cache-Control', 'no-store').json({ iceServers });
     return;
   }
   const iceServers = [

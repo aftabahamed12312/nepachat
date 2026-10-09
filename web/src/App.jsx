@@ -37,8 +37,8 @@ const getCallMedia = async (constraints, device = 'camera and microphone') => {
     if (constraints.video && constraints.audio && typeof constraints.audio === 'object') {
       try {
         return await navigator.mediaDevices.getUserMedia({ audio: false, video: constraints.video });
-      } catch {
-        // Keep the original combined-request error if video-only access fails too.
+      } catch (videoError) {
+        throw new Error(getCallMediaError(videoError, 'camera'));
       }
     }
     throw new Error(getCallMediaError(error, device));
@@ -382,7 +382,8 @@ function CallPanel({ callState, localStream, remoteStream, peerConnection, audio
     : callState.status === 'calling' ? 'Calling…'
       : callState.status === 'active' ? 'Connected'
         : callState.status === 'reconnecting' ? 'Reconnecting…'
-          : callState.status === 'failed' ? 'Connection failed' : 'Connecting…';
+          : callState.status === 'failed' || callState.status === 'error' ? 'Connection failed'
+            : callState.status === 'preparing' ? 'Starting camera…' : 'Connecting…';
   const handleDragStart = event => {
     if (event.button !== 0 || event.target.closest('button')) return;
     event.preventDefault();
@@ -1222,12 +1223,11 @@ export default function App() {
 
   const startCall = async kind => {
     if (!active || !socketRef.current || callRef.current) return;
+    let stream;
     try {
       if (kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
-      const { iceServers } = await call('/calls/ice-servers', token);
-      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
-      const stream = await getCallMedia({
+      stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
@@ -1237,33 +1237,50 @@ export default function App() {
         throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
       }
       if (kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
-      const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
       const current = {
         chatId: active.id, callId: crypto.randomUUID(), peerUserId: active.other.id,
-        peerName: '@' + active.other.username, kind, status: 'calling', hasTurnServer,
+        peerName: '@' + active.other.username, kind, status: 'preparing',
         error: kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
       };
-      const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
-      callRef.current = current; setCallState(current); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
+      callRef.current = current;
+      setCallState(current);
+      setCallLayout('overlay');
+      localStreamRef.current = stream;
+      setLocalStream(stream);
       setAudioEnabled(Boolean(stream.getAudioTracks().length));
+      const { iceServers } = await call('/calls/ice-servers', token);
+      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
+      const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
+      const calling = { ...current, status: 'calling', hasTurnServer };
+      callRef.current = calling;
+      setCallState(calling);
+      const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       const offer = await peer.createOffer(); await peer.setLocalDescription(offer);
       socketRef.current.emit('call:invite', { chatId: current.chatId, callId: current.callId, kind, offer: peer.localDescription });
     } catch (error) {
-      clearCall();
-      setCallState({ peerName: '@' + active.other.username, kind, status: 'error', error: error.message || 'Unable to start the call.' });
+      if (stream && callRef.current) {
+        peerRef.current?.close();
+        peerRef.current = null;
+        setPeerConnection(null);
+        const failed = { ...callRef.current, status: 'failed', error: error.message || 'Unable to start the call.' };
+        callRef.current = failed;
+        setCallState(failed);
+      } else {
+        clearCall();
+        setCallState({ peerName: '@' + active.other.username, kind, status: 'error', error: error.message || 'Unable to start the call.' });
+      }
     }
   };
 
   const acceptCall = async () => {
     const current = callRef.current;
     if (!current?.incoming) return;
+    let stream;
     try {
       if (current.kind === 'video' && window.isSecureContext === false) throw new Error('Camera access requires a secure connection (HTTPS or localhost).');
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot access the camera. Open NepaChat over HTTPS in a supported browser.');
-      const { iceServers } = await call('/calls/ice-servers', token);
-      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
-      const stream = await getCallMedia({
+      stream = await getCallMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: current.kind === 'video' ? { facingMode: { ideal: 'user' } } : false,
       });
@@ -1273,14 +1290,24 @@ export default function App() {
         throw new Error('Camera access was granted but no live video track was created. Check browser camera permissions and device settings.');
       }
       if (current.kind === 'video') setCameraFacing(stream.getVideoTracks()[0]?.getSettings().facingMode || 'user');
+      const starting = {
+        ...current, incoming: false, status: 'preparing',
+        error: current.kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
+      };
+      callRef.current = starting;
+      setCallState(starting);
+      setCallLayout('overlay');
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      setAudioEnabled(Boolean(stream.getAudioTracks().length));
+      const { iceServers } = await call('/calls/ice-servers', token);
+      if (!Array.isArray(iceServers) || !iceServers.length) throw new Error('The call server returned no ICE servers. Check the call relay configuration.');
       const hasTurnServer = iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url || '')));
       const peer = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4 });
       const connecting = {
-        ...current, incoming: false, status: 'connecting', hasTurnServer,
-        error: current.kind === 'video' && !stream.getAudioTracks().length ? 'Camera is active, but microphone access was unavailable; this call will have no outgoing audio.' : '',
+        ...starting, status: 'connecting', hasTurnServer,
       };
       callRef.current = connecting; setCallState(connecting); setCallLayout('overlay'); localStreamRef.current = stream; setLocalStream(stream);
-      setAudioEnabled(Boolean(stream.getAudioTracks().length));
       attachPeer(peer, current); stream.getTracks().forEach(track => peer.addTrack(track, stream));
       await peer.setRemoteDescription(current.offer);
       const candidates = pendingCandidatesRef.current.filter(item => item.callId === current.callId);
@@ -1289,7 +1316,16 @@ export default function App() {
       const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
       socketRef.current.emit('call:signal', { chatId: current.chatId, callId: current.callId, signal: { type: 'answer', sdp: peer.localDescription } });
     } catch (error) {
-      setCallState(c => c ? { ...c, error: error.message || 'Unable to answer the call.' } : c);
+      if (stream) {
+        peerRef.current?.close();
+        peerRef.current = null;
+        setPeerConnection(null);
+        const failed = { ...callRef.current, incoming: false, status: 'failed', error: error.message || 'Unable to answer the call.' };
+        callRef.current = failed;
+        setCallState(failed);
+      } else {
+        setCallState(c => c ? { ...c, error: error.message || 'Unable to answer the call.' } : c);
+      }
     }
   };
 
