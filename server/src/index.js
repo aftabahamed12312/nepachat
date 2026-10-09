@@ -67,6 +67,7 @@ app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
 app.use(express.json({ limit: '50kb' }));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') } });
+const liveUserSockets = new Map();
 const localUploadsDir = path.resolve(UPLOADS_DIR || path.join(process.cwd(), 'uploads'));
 await fs.mkdir(localUploadsDir, { recursive: true });
 const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
@@ -203,6 +204,10 @@ async function sendVerificationEmail(to, code) {
 const pub = u => ({
   id: String(u._id), username: u.username, email: u.email,
   avatarPath: u.avatarKey ? `/api/users/${u._id}/avatar?v=${encodeURIComponent(path.basename(u.avatarKey))}` : null,
+});
+const presenceView = (user, userId = String(user._id)) => ({
+  online: liveUserSockets.has(userId),
+  lastSeenAt: user.lastSeenAt || null,
 });
 const accountView = u => ({ ...pub(u), role: u.role || 'user' });
 const sign = (u, deviceId) => jwt.sign({ id: String(u._id), did: deviceId }, JWT_SECRET, { expiresIn: '30d' });
@@ -370,7 +375,11 @@ async function messageView(message, req) {
 async function chatView(c, me) {
   const other = c.members.find(m => m !== me) || me;
   const u = await users.findOne({ _id: oid(other) });
-  return { id: String(c._id), other: u ? pub(u) : { id: other, username: 'unknown', email: '' }, last: c.last || '', ts: c.ts || 0, by: c.by || '' };
+  return {
+    id: String(c._id),
+    other: u ? { ...pub(u), ...presenceView(u, other) } : { id: other, username: 'unknown', email: '', online: false, lastSeenAt: null },
+    last: c.last || '', ts: c.ts || 0, by: c.by || '',
+  };
 }
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
@@ -876,7 +885,7 @@ async function friendStateFor(userId) {
     const otherId = link.fromId === userId ? link.toId : link.fromId;
     const user = await users.findOne({ _id: oid(otherId) });
     if (!user) return;
-    const person = pub(user);
+    const person = { ...pub(user), ...(link.status === 'accepted' ? presenceView(user, otherId) : {}) };
     if (link.status === 'accepted') friends.push(person);
     else if (link.toId === userId) incoming.push({ id: String(link._id), user: person, createdAt: link.createdAt });
     else outgoing.push({ id: String(link._id), user: person, createdAt: link.createdAt });
@@ -964,7 +973,21 @@ app.delete('/api/friends/:friendId', auth, wrap(async (req, res) => {
 
 app.get('/api/chats', auth, wrap(async (req, res) => {
   const list = await chats.find({ members: req.uid }).sort({ ts: -1 }).toArray();
-  res.json(await Promise.all(list.map(c => chatView(c, req.uid))));
+  const peerIds = list
+    .filter(chat => chat.members?.length === 2)
+    .map(chat => chat.members.find(id => id !== req.uid))
+    .filter(Boolean);
+  const acceptedPairs = await friendships.find({
+    pairKey: { $in: peerIds.map(peerId => [req.uid, peerId].sort().join('~')) },
+    status: 'accepted',
+  }, { projection: { pairKey: 1 } }).toArray();
+  const acceptedPairKeys = new Set(acceptedPairs.map(friendship => friendship.pairKey));
+  const visibleChats = list.filter(chat => {
+    if (chat.members?.length !== 2) return false;
+    const peerId = chat.members.find(id => id !== req.uid);
+    return peerId && acceptedPairKeys.has([req.uid, peerId].sort().join('~'));
+  });
+  res.json(await Promise.all(visibleChats.map(c => chatView(c, req.uid))));
 }));
 
 app.post('/api/chats', auth, wrap(async (req, res) => {
@@ -972,12 +995,23 @@ app.post('/api/chats', auth, wrap(async (req, res) => {
   const target = await users.findOne(q.includes('@') ? { email: q } : { username: q });
   if (!target) return res.status(404).json({ error: 'No NepaChat user found', invite: emailRx.test(q) });
   const tid = String(target._id);
+  if (tid === req.uid) return res.status(400).json({ error: 'You cannot start a chat with yourself' });
   const key = [req.uid, tid].sort().join('~');
+  if (!await friendships.findOne({ pairKey: key, status: 'accepted' })) {
+    return res.status(403).json({ error: 'You can only chat with accepted friends. Send a friend request and wait for it to be accepted.' });
+  }
   await chats.updateOne({ key }, { $setOnInsert: { key, members: [...new Set([req.uid, tid])], ts: Date.now(), last: '' } }, { upsert: true });
   res.json(await chatView(await chats.findOne({ key }), req.uid));
 }));
 
-const member = async (cid, uid) => { const id = oid(cid); return id && chats.findOne({ _id: id, members: uid }); };
+const member = async (cid, uid) => {
+  const id = oid(cid);
+  const chat = id && await chats.findOne({ _id: id, members: uid });
+  if (!chat || chat.members?.length !== 2) return null;
+  const peerId = chat.members.find(memberId => memberId !== uid);
+  if (!peerId || !await friendships.findOne({ pairKey: [uid, peerId].sort().join('~'), status: 'accepted' })) return null;
+  return chat;
+};
 
 const mediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm']);
 const mediaLimit = 25 * 1024 * 1024;
@@ -1460,9 +1494,60 @@ io.use((s, next) => {
     next(new Error('auth'));
   });
 });
+async function broadcastPresence(userId) {
+  try {
+    const [links, user] = await Promise.all([
+      friendships.find({
+        $or: [{ fromId: userId }, { toId: userId }],
+        status: 'accepted',
+      }, { projection: { fromId: 1, toId: 1 } }).toArray(),
+      users.findOne({ _id: oid(userId) }, { projection: { lastSeenAt: 1 } }),
+    ]);
+    const presence = {
+      userId,
+      online: liveUserSockets.has(userId),
+      lastSeenAt: user?.lastSeenAt || null,
+    };
+    for (const link of links) {
+      const friendId = link.fromId === userId ? link.toId : link.fromId;
+      io.to('u:' + friendId).emit('presence:changed', presence);
+    }
+  } catch (error) {
+    console.error(`Unable to broadcast presence for user ${userId}:`, error);
+  }
+}
+async function syncFriendPresence(userId) {
+  try {
+    const links = await friendships.find({
+      $or: [{ fromId: userId }, { toId: userId }],
+      status: 'accepted',
+    }, { projection: { fromId: 1, toId: 1 } }).toArray();
+    const friendIds = links.map(link => link.fromId === userId ? link.toId : link.fromId);
+    const friendUsers = await users.find(
+      { _id: { $in: friendIds.map(oid).filter(Boolean) } },
+      { projection: { lastSeenAt: 1 } },
+    ).toArray();
+    for (const user of friendUsers) {
+      const friendId = String(user._id);
+      io.to('u:' + userId).emit('presence:changed', {
+        userId: friendId,
+        online: liveUserSockets.has(friendId),
+        lastSeenAt: user.lastSeenAt || null,
+      });
+    }
+  } catch (error) {
+    console.error(`Unable to sync friend presence for user ${userId}:`, error);
+  }
+}
 io.on('connection', s => {
   s.join('u:' + s.uid);
   if (s.deviceId) s.join('d:' + s.deviceId);
+  const userSockets = liveUserSockets.get(s.uid) || new Set();
+  const wasOnline = userSockets.size > 0;
+  userSockets.add(s.id);
+  liveUserSockets.set(s.uid, userSockets);
+  if (!wasOnline) broadcastPresence(s.uid);
+  syncFriendPresence(s.uid);
   let deviceCheck;
   if (s.deviceId) {
     const validateDevice = () => deviceSessions.findOne({
@@ -1480,7 +1565,18 @@ io.on('connection', s => {
     });
     deviceCheck = setInterval(validateDevice, 30_000);
   }
-  s.on('disconnect', () => { if (deviceCheck) clearInterval(deviceCheck); });
+  s.on('disconnect', () => {
+    if (deviceCheck) clearInterval(deviceCheck);
+    const activeSockets = liveUserSockets.get(s.uid);
+    if (!activeSockets) return;
+    activeSockets.delete(s.id);
+    if (activeSockets.size) return;
+    liveUserSockets.delete(s.uid);
+    const lastSeenAt = new Date();
+    users.updateOne({ _id: oid(s.uid) }, { $set: { lastSeenAt } })
+      .then(() => broadcastPresence(s.uid))
+      .catch(error => console.error(`Unable to save last-seen time for user ${s.uid}:`, error));
+  });
   const recordReceipt = async ({ chatId, messageId } = {}, status) => {
     try {
       const chat = typeof chatId === 'string' && await member(chatId, s.uid);

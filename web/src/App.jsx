@@ -105,10 +105,22 @@ const call = async (path, token, method = 'GET', body) => {
   return d;
 };
 const time = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-const Avatar = ({ name, big, avatarPath }) => (
+const presenceLabel = user => {
+  if (user?.online) return 'Online';
+  if (!user?.lastSeenAt) return 'Offline';
+  const lastSeenAt = new Date(user.lastSeenAt);
+  if (Number.isNaN(lastSeenAt.getTime())) return 'Offline';
+  const elapsed = Math.max(0, Date.now() - lastSeenAt.getTime());
+  if (elapsed < 60_000) return 'Last seen just now';
+  if (elapsed < 60 * 60_000) return `Last seen ${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 24 * 60 * 60_000) return `Last seen ${Math.floor(elapsed / (60 * 60_000))}h ago`;
+  return `Last seen ${lastSeenAt.toLocaleDateString()}`;
+};
+const Avatar = ({ name, big, avatarPath, online = false }) => (
   <div className={'avatar' + (big ? ' big' : '')}>
     {avatarPath && <img key={avatarPath} src={API + avatarPath} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
     <span>{(name || '?')[0].toUpperCase()}</span>
+    {online && <i className="presence-dot" aria-label="Online" />}
   </div>
 );
 function ActivityMediaItem({ attachment, onRefresh }) {
@@ -226,7 +238,7 @@ function PasswordField({ label, value, onChange, autoComplete, minLength, requir
 }
 
 function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
-  const [mode, setMode] = useState('login');
+  const [mode, setMode] = useState(() => new URLSearchParams(window.location.search).get('auth') === 'signup' ? 'register' : 'login');
   const [f, setF] = useState({ username: '', email: '', password: '' });
   const [err, setErr] = useState(''), [notice, setNotice] = useState(''), [awaitingCode, setAwaitingCode] = useState(false), [code, setCode] = useState('');
   const set = k => e => setF({ ...f, [k]: e.target.value });
@@ -247,6 +259,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
       else if (awaitingCode) {
         await call('/verify-email', null, 'POST', { email: f.email, code });
         setMode('login');
+        setAuthUrl('login');
         setAwaitingCode(false);
         setCode('');
         setNotice('Email verified. Sign in with your new account.');
@@ -257,7 +270,16 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
       }
     } catch (x) { setErr(x.message); }
   };
-  const switchMode = () => { setMode(mode === 'login' ? 'register' : 'login'); setErr(''); setNotice(''); setAwaitingCode(false); setCode(''); };
+  const setAuthUrl = authMode => {
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set('auth', authMode);
+    window.history.replaceState({}, '', nextUrl);
+  };
+  const switchMode = () => {
+    const nextMode = mode === 'login' ? 'register' : 'login';
+    setAuthUrl(nextMode === 'register' ? 'signup' : 'login');
+    setMode(nextMode); setErr(''); setNotice(''); setAwaitingCode(false); setCode('');
+  };
   const resend = async () => {
     setErr(''); setNotice('');
     try { const d = await call('/register', null, 'POST', f); setNotice(d.message); }
@@ -265,7 +287,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   };
   return (
     <div className="auth">
-      <header className="top"><b>Nepa<span>Chat</span></b></header>
+      <header className="top"><b>Nepa<span>Chat</span></b><nav className="auth-nav" aria-label="NepaChat pages"><a href="/about/">About NepaChat</a></nav></header>
       <main className="auth-main">
         <form className="card" onSubmit={go}>
           <h2>{mode === 'login' ? 'Welcome back' : awaitingCode ? 'Check your email' : 'Create your account'}</h2>
@@ -283,33 +305,6 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
             ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
             : <p className="sw">Account creation is managed by the owner.</p>}
         </form>
-        <article className="auth-seo-content">
-          <header className="auth-seo-intro">
-            <p className="auth-seo-eyebrow">A simple way to stay in touch</p>
-            <h1>NepaChat: messaging and video calls in one place</h1>
-            <p>NepaChat is an online chat app for real-time conversations, photo and video sharing, and one-to-one audio and video calls. Sign in on your devices and pick up your conversations wherever you use NepaChat.</p>
-            {allowPublicSignUp && <button className="auth-seo-cta" onClick={() => { setMode('register'); setErr(''); setNotice(''); }}>Create a NepaChat account</button>}
-            <p className="auth-seo-more"><a href="/about/">Explore NepaChat features</a></p>
-          </header>
-          <section id="features" className="auth-seo-features" aria-labelledby="auth-seo-features-title">
-            <h2 id="auth-seo-features-title">What you can do with NepaChat</h2>
-            <div className="auth-seo-grid">
-              <section><h3>Chat in real time</h3><p>Send messages in one-to-one conversations and see delivery and read status.</p></section>
-              <section><h3>Share photos and videos</h3><p>Send images and video clips in your conversations, or share posts in the friends-only Activity feed.</p></section>
-              <section><h3>Make audio and video calls</h3><p>Start one-to-one calls from a chat. Video calls include camera controls and a movable mini-call window.</p></section>
-              <section><h3>Use your signed-in devices</h3><p>Sign in to the same account on multiple devices and access your server-synced chats.</p></section>
-            </div>
-          </section>
-          <section className="auth-seo-faq" aria-labelledby="auth-seo-faq-title">
-            <h2 id="auth-seo-faq-title">About NepaChat</h2>
-            <h3>What is NepaChat?</h3>
-            <p>NepaChat is a web-based messaging app with direct chat, photo and video sharing, a friends Activity feed, and one-to-one audio and video calling.</p>
-            <h3>Can I use NepaChat on more than one device?</h3>
-            <p>Yes. Sign in with the same account on another device to use your chats there. Calls require a supported browser and permission to use the camera or microphone.</p>
-            <h3>How do I get started?</h3>
-            <p>Sign in if you already have an account, or create an account and verify your email if registration is available.</p>
-          </section>
-        </article>
       </main>
     </div>
   );
@@ -583,29 +578,83 @@ function CallPanel({ callState, setCallState, localStream, remoteStream, peerCon
   );
 }
 
-function NewChat({ token, onClose, onOpen, me }) {
-  const [q, setQ] = useState(''), [hits, setHits] = useState([]), [msg, setMsg] = useState(null);
+function NewChat({ token, onClose, onOpen, onFriendChange, friendData, me }) {
+  const [q, setQ] = useState(''), [hits, setHits] = useState([]), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const [workingId, setWorkingId] = useState(''), [searching, setSearching] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => call('/users/search?q=' + encodeURIComponent(q), token).then(setHits).catch(() => {}), 250);
-    return () => clearTimeout(t);
-  }, [q]);
-  const start = async to => {
-    try { onOpen(await call('/chats', token, 'POST', { to })); onClose(); }
-    catch (e) { setMsg(e.data?.invite ? { email: to } : { text: e.message }); }
+    let current = true;
+    setHits([]);
+    setError('');
+    setSearching(q.trim().length >= 2);
+    if (q.trim().length < 2) {
+      return () => { current = false; };
+    }
+    const t = setTimeout(() => call('/users/search?q=' + encodeURIComponent(q), token)
+      .then(users => {
+        if (!current) return;
+        setHits(users);
+        setSearching(false);
+      })
+      .catch(searchError => {
+        if (!current) return;
+        setError(searchError.message);
+        setSearching(false);
+      }), 250);
+    return () => { current = false; clearTimeout(t); };
+  }, [q, token]);
+  const start = async user => {
+    setError('');
+    try {
+      onOpen(await call('/chats', token, 'POST', { to: user.username }));
+      onClose();
+    } catch (e) { setError(e.message); }
+  };
+  const updateFriendship = async (user, request) => {
+    setError('');
+    setNotice('');
+    setWorkingId(user.id);
+    try {
+      if (request) await call(`/friends/requests/${request.id}`, token, 'PATCH', { action: 'accept' });
+      else await call('/friends/requests', token, 'POST', { to: user.username });
+      await onFriendChange();
+      setNotice(request ? `You and @${user.username} are now friends. You can start a chat.` : `Friend request sent to @${user.username}. You can chat after they accept.`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setWorkingId('');
+    }
   };
   const isMail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(q.trim());
   return (
     <div className="modal" onClick={onClose}>
       <div className="sheet" onClick={e => e.stopPropagation()}>
         <h3>New chat</h3>
-        <input autoFocus value={q} onChange={e => { setQ(e.target.value); setMsg(null); }} placeholder="Email address or @username" onKeyDown={e => e.key === 'Enter' && q.trim() && start(q.trim())} />
+        <p className="muted">You can chat only with accepted friends. Find someone and send a request first.</p>
+        <input autoFocus value={q} onChange={e => { setQ(e.target.value); setError(''); setNotice(''); }} placeholder="Search by email or @username" />
         <div className="hits">
-          {hits.map(u => <button key={u.id} className="row" onClick={() => start(u.username)}><Avatar name={u.username} avatarPath={u.avatarPath} /><div><b>{u.username}</b><small>{u.email}</small></div></button>)}
-          {q.trim().length > 1 && !hits.length && <p className="muted">No match yet. Press Enter to try exactly “{q.trim()}”.</p>}
-          {msg?.text && <p className="err">{msg.text}</p>}
-          {(msg?.email || (isMail && !hits.length)) && (
-            <a className="row invite" href={`mailto:${msg?.email || q.trim()}?subject=${encodeURIComponent('Join me on NepaChat')}&body=${encodeURIComponent(`Hi! ${me.username} invited you to NepaChat: ${location.origin}`)}`}>
-              <div className="avatar">✉</div><div><b>Invite {msg?.email || q.trim()}</b><small>Send an invitation by email</small></div>
+          {hits.map(user => {
+            const isFriend = friendData.friends.some(friend => friend.id === user.id);
+            const incoming = friendData.incoming.find(request => request.user.id === user.id);
+            const outgoing = friendData.outgoing.some(request => request.user.id === user.id);
+            return <div key={user.id} className="row">
+              <Avatar name={user.username} avatarPath={user.avatarPath} />
+              <div className="grow"><b>{user.username}</b><small>{user.email}</small></div>
+              {isFriend
+                ? <button className="btn" disabled={workingId === user.id} onClick={() => start(user)}>Open chat</button>
+                : incoming
+                  ? <button className="btn" disabled={workingId === user.id} onClick={() => updateFriendship(user, incoming)}>Accept request</button>
+                  : outgoing
+                    ? <span className="friend-status">Request sent</span>
+                    : <button className="btn" disabled={workingId === user.id} onClick={() => updateFriendship(user, null)}>{workingId === user.id ? 'Sending…' : 'Add friend'}</button>}
+            </div>;
+          })}
+          {searching && <p className="muted">Searching…</p>}
+          {!searching && q.trim().length > 1 && !hits.length && <p className="muted">No matching user found.</p>}
+          {error && <p className="err">{error}</p>}
+          {notice && <p className="notice">{notice}</p>}
+          {isMail && !hits.some(user => user.email.toLowerCase() === q.trim().toLowerCase()) && (
+            <a className="row invite" href={`mailto:${q.trim()}?subject=${encodeURIComponent('Join me on NepaChat')}&body=${encodeURIComponent(`Hi! ${me.username} invited you to NepaChat: ${location.origin}`)}`}>
+              <div className="avatar">✉</div><div><b>Invite {q.trim()}</b><small>Send an invitation by email</small></div>
             </a>)}
         </div>
         <button className="btn ghost" onClick={onClose}>Close</button>
@@ -980,7 +1029,7 @@ export default function App() {
       wasOn = shouldBeOn;
       const now = context.currentTime;
       gain.gain.cancelScheduledValues(now);
-      gain.gain.setTargetAtTime(shouldBeOn ? 0.07 : 0, now, 0.025);
+      gain.gain.setTargetAtTime(shouldBeOn ? 0.18 : 0, now, 0.025);
     };
     const timer = window.setInterval(updateTone, 100);
     callToneRef.current = { gain, oscillators, timer };
@@ -1033,6 +1082,32 @@ export default function App() {
     callAudioContextRef.current?.close().catch(error => console.warn('Unable to close call audio:', error));
   }, []);
   useEffect(() => {
+    const unlockCallAudio = () => {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      try {
+        const context = callAudioContextRef.current || new AudioContextClass();
+        callAudioContextRef.current = context;
+        if (context.state === 'suspended') context.resume().catch(error => console.warn('Unable to enable call sounds:', error));
+      } catch (error) {
+        console.warn('Unable to initialize call sounds:', error);
+      }
+    };
+    const resumeCallAudio = () => {
+      if (document.visibilityState === 'visible') unlockCallAudio();
+    };
+    document.addEventListener('pointerdown', unlockCallAudio, true);
+    document.addEventListener('keydown', unlockCallAudio, true);
+    document.addEventListener('visibilitychange', resumeCallAudio);
+    window.addEventListener('focus', resumeCallAudio);
+    return () => {
+      document.removeEventListener('pointerdown', unlockCallAudio, true);
+      document.removeEventListener('keydown', unlockCallAudio, true);
+      document.removeEventListener('visibilitychange', resumeCallAudio);
+      window.removeEventListener('focus', resumeCallAudio);
+    };
+  }, []);
+  useEffect(() => {
     const markOnline = () => setIsOnline(true);
     const markOffline = () => setIsOnline(false);
     window.addEventListener('online', markOnline);
@@ -1075,6 +1150,17 @@ export default function App() {
     return updated;
   });
   const refreshFriendData = () => call('/friends', token).then(setFriendData);
+  const updatePresence = presence => {
+    const mergeUserPresence = user => user?.id === presence.userId
+      ? { ...user, online: presence.online, lastSeenAt: presence.lastSeenAt }
+      : user;
+    setChats(current => current.map(chat => ({ ...chat, other: mergeUserPresence(chat.other) })));
+    setActive(current => current ? { ...current, other: mergeUserPresence(current.other) } : current);
+    setFriendData(current => ({
+      ...current,
+      friends: current.friends.map(mergeUserPresence),
+    }));
+  };
 
   useEffect(() => {
     if (!me?.id || !chats.length) return;
@@ -1176,6 +1262,7 @@ export default function App() {
         badge: options.icon || '/icon.svg',
         tag: options.tag || undefined,
         requireInteraction: Boolean(options.requireInteraction),
+        vibrate: options.vibrate || undefined,
         data: { url: options.url || '/', focusOnly: Boolean(options.onClick) },
       })).catch(error => console.error('Unable to show device notification:', error));
       return;
@@ -1629,7 +1716,9 @@ export default function App() {
     const loadChats = async () => {
       try {
         const cached = await loadCachedChats(me.id);
-        if (current && Array.isArray(cached)) setChats(cached);
+        if (current && Array.isArray(cached)) {
+          setChats(cached.map(chat => ({ ...chat, other: { ...chat.other, online: false } })));
+        }
       } catch (error) {
         console.error('Unable to load chats from the local cache:', error);
       }
@@ -1715,10 +1804,18 @@ export default function App() {
     });
     s.on('friend:changed', () => {
       refreshFriendData().catch(error => console.error('Unable to refresh friend requests:', error));
+      call('/chats', token).then(list => {
+        setChats(list);
+        if (activeRef.current && !list.some(chat => chat.id === activeRef.current.id)) {
+          setActive(null);
+          setMessages([]);
+        }
+      }).catch(error => console.error('Unable to refresh chats after friend update:', error));
       if (activeViewRef.current === 'activity') {
         call('/activity/posts', token).then(setActivityPosts).catch(error => console.error('Unable to refresh activity after friend update:', error));
       }
     });
+    s.on('presence:changed', updatePresence);
     s.on('account:changed', () => {
       call('/chats', token).then(setChats).catch(error => console.error('Unable to refresh chats after account deletion:', error));
       refreshFriendData().catch(error => console.error('Unable to refresh friends after account deletion:', error));
@@ -1735,7 +1832,7 @@ export default function App() {
       showSystemNotification(`Incoming ${incoming.kind} call`, {
         body: `@${incoming.from.username} is calling you`,
         tag: `call-${incoming.callId}`,
-        requireInteraction: true,
+        requireInteraction: true, vibrate: [500, 250, 500, 250, 800],
         onClick: () => setCallLayout('overlay'),
       });
     });
@@ -1864,7 +1961,16 @@ export default function App() {
   }, [active?.id, token, me?.id]);
   useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
 
-  const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActive(c); };
+  const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActiveView('chats'); setActive(c); };
+  const openFriendChat = async friend => {
+    setFriendError('');
+    try {
+      open(await call('/chats', token, 'POST', { to: friend.username }));
+      setFriendPanel('');
+    } catch (error) {
+      setFriendError(error.message);
+    }
+  };
   const selectView = view => {
     setActiveView(view);
     setActive(null);
@@ -2123,7 +2229,8 @@ export default function App() {
   };
 
   if (!auth) return <Auth onAuth={onAuth} allowPublicSignUp={publicConfig.allowPublicSignUp} emailVerificationEnabled={publicConfig.emailVerificationEnabled} />;
-  const shown = chats.filter(c => (c.other.username + c.other.email).includes(filter.toLowerCase()));
+  const acceptedFriendIds = new Set(friendData.friends.map(friend => friend.id));
+  const shown = chats.filter(c => acceptedFriendIds.has(c.other.id) && (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
   return (
     <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
@@ -2151,8 +2258,8 @@ export default function App() {
             {!shown.length && <p className="muted pad">No chats yet. Tap ＋ to start one.</p>}
             {shown.map(c => (
               <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => { setActiveView('chats'); setActive(c); }}>
-                <Avatar name={c.other.username} avatarPath={c.other.avatarPath} />
-                <div className="grow"><b>{c.other.username}</b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
+                <Avatar name={c.other.username} avatarPath={c.other.avatarPath} online={c.other.online} />
+                <div className="grow"><b className="chat-user-name">{c.other.username}<span className={'presence-state' + (c.other.online ? ' online' : '')}>{presenceLabel(c.other)}</span></b><small>{c.last ? (c.by === me.id ? 'You: ' : '') + c.last : 'Say hello 👋'}</small></div>
                 {c.ts > 0 && <em>{time(c.ts)}</em>}
               </button>))}
           </div>
@@ -2222,9 +2329,10 @@ export default function App() {
             {friendPanel === 'friends' && <>
               {!friendData.friends.length && <p className="muted">No friends yet. Find people and send a request.</p>}
               {friendData.friends.map(friend => <div className="friend-row" key={friend.id}>
-                <Avatar name={friend.username} avatarPath={friend.avatarPath} />
-                <div className="grow"><b>{friend.username}</b><small>{friend.email}</small></div>
+                <Avatar name={friend.username} avatarPath={friend.avatarPath} online={friend.online} />
+                <div className="grow"><b>{friend.username}</b><small className="presence-label">{presenceLabel(friend)} · {friend.email}</small></div>
                 <span className="friend-status">Friends</span>
+                <button className="btn" onClick={() => openFriendChat(friend)}>Message</button>
               </div>)}
             </>}
           </section>}
@@ -2271,8 +2379,8 @@ export default function App() {
         </div> : !active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
           <div className="chead">
             <button className="back" onClick={() => setActive(null)}>←</button>
-            <Avatar name={active.other.username} avatarPath={active.other.avatarPath} big />
-            <div className="grow"><b>{active.other.username}</b><small>{active.other.email}</small></div>
+            <Avatar name={active.other.username} avatarPath={active.other.avatarPath} online={active.other.online} big />
+            <div className="grow"><b>{active.other.username}</b><small className="presence-label">{presenceLabel(active.other)}</small></div>
             <button className="mail" title="Share live location" aria-label="Share live location" onClick={() => setLocationModal(true)}>⌖</button>
             <button className="mail" title="Start audio call" aria-label="Start audio call" onClick={() => startCall('audio')}>☎</button>
             <button className="mail" title="Start video call" aria-label="Start video call" onClick={() => startCall('video')}>▣</button>
@@ -2327,7 +2435,7 @@ export default function App() {
           <button className="btn ghost" onClick={dismissNotificationPrompt}>Not now</button>
         </section>
       </div>}
-      {modal && <NewChat token={token} me={me} onClose={() => setModal(false)} onOpen={open} />}
+      {modal && <NewChat token={token} me={me} friendData={friendData} onFriendChange={refreshFriendData} onClose={() => setModal(false)} onOpen={open} />}
       {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} />}
       {adminUsersOpen && <AdminUsers token={token} currentUserId={me.id} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}

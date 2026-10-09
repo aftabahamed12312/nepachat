@@ -18,8 +18,12 @@
       *{box-sizing:border-box}
       body{margin:0}
       header,main,footer{width:min(100% - 32px,900px);margin:auto}
-      header{padding:24px 0}
+      header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 0}
       header a,footer a{color:#053215;font-weight:700;text-decoration:none}
+      .nav{display:flex;align-items:center;gap:10px}
+      .nav a{padding:8px 13px;border:1px solid #d6e2d9;border-radius:9px}
+      .nav .signup{border-color:#053215;background:#053215;color:#fff}
+      a:focus-visible{outline:3px solid #59a675;outline-offset:3px}
       main{padding:48px 0 64px}
       .intro{max-width:720px;margin:0 auto 36px;text-align:center}
       .intro small{color:#176832;font-weight:750;letter-spacing:.08em;text-transform:uppercase}
@@ -54,13 +58,19 @@
     </script>
   </head>
   <body>
-    <header><a href="/" aria-label="NepaChat home">NepaChat</a></header>
+    <header>
+      <a href="/about/" aria-label="NepaChat about page">NepaChat</a>
+      <nav class="nav" aria-label="Account">
+        <a href="/?auth=login">Login</a>
+        <a class="signup" href="/?auth=signup">Sign up</a>
+      </nav>
+    </header>
     <main>
       <section class="intro">
         <small>Chat, sharing and calling</small>
         <h1>Meet NepaChat, a web chat app for everyday conversations</h1>
         <p>NepaChat brings direct messaging, photo and video sharing, a friends-only Activity feed, and one-to-one audio and video calls together in one browser-based app.</p>
-        <a class="button" href="/">Sign in or create an account</a>
+        <a class="button" href="/?auth=signup">Create an account</a>
       </section>
       <section class="features" aria-labelledby="features-title">
         <h2 id="features-title">NepaChat features</h2>
@@ -81,6 +91,6 @@
         <p>Yes. Sign in with the same account on another device to access your server-synced chats.</p>
       </section>
     </main>
-    <footer><a href="/">Open NepaChat</a></footer>
+    <footer><a href="/?auth=login">Login to NepaChat</a></footer>
   </body>
 </html>
