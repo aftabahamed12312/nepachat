@@ -1,6 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { clearCachedUser, loadCachedChats, loadCachedMessages, saveCachedChats, saveCachedMessages } from './localCache.js';
+import {
+  clearCachedUser,
+  loadCachedActivity,
+  loadCachedActivityComments,
+  loadCachedCallHistory,
+  loadCachedChats,
+  loadCachedFriends,
+  loadCachedMessages,
+  loadCachedSettings,
+  saveCachedActivity,
+  saveCachedActivityComments,
+  saveCachedCallHistory,
+  saveCachedChats,
+  saveCachedFriends,
+  saveCachedMessages,
+  saveCachedSettings,
+} from './localCache.js';
 import {
   CloseOutlined,
   CommentOutlined,
@@ -883,9 +899,21 @@ function ProfileSettings({ me, token, onClose, onUpdated }) {
   );
 }
 
-function CallHistory({ token, onClose }) {
+function CallHistory({ token, userId, onClose }) {
   const [history, setHistory] = useState([]), [error, setError] = useState('');
-  useEffect(() => { call('/calls/history', token).then(setHistory).catch(requestError => setError(requestError.message)); }, [token]);
+  useEffect(() => {
+    let current = true;
+    loadCachedCallHistory(userId)
+      .then(cached => { if (current && Array.isArray(cached)) setHistory(cached); })
+      .catch(cacheError => console.error('Unable to load call history from the local cache:', cacheError));
+    call('/calls/history', token).then(items => {
+      if (!current) return;
+      setHistory(items);
+      saveCachedCallHistory(userId, items).catch(cacheError => console.error('Unable to save call history to the local cache:', cacheError));
+      setError('');
+    }).catch(requestError => { if (current) setError(requestError.message); });
+    return () => { current = false; };
+  }, [token, userId]);
   const label = item => item.status === 'missed' ? 'Missed' : item.status === 'declined' ? 'Declined' : item.status === 'cancelled' ? 'Cancelled' : item.status === 'ended' ? 'Ended' : item.status === 'active' ? 'Connected' : 'Ringing';
   return (
     <div className="modal" onClick={onClose}>
@@ -961,6 +989,7 @@ export default function App() {
   const [locationShares, setLocationShares] = useState([]), [locationError, setLocationError] = useState('');
   const [pushError, setPushError] = useState('');
   const [notificationPromptOpen, setNotificationPromptOpen] = useState(false), [configLoaded, setConfigLoaded] = useState(false);
+  const [cacheLoadedFor, setCacheLoadedFor] = useState('');
   const [alerts, setAlerts] = useState([]);
   const [callState, setCallState] = useState(null), [localStream, setLocalStream] = useState(null), [remoteStream, setRemoteStream] = useState(null), [peerConnection, setPeerConnection] = useState(null);
   const [audioEnabled, setAudioEnabled] = useState(true), [videoEnabled, setVideoEnabled] = useState(true), [noiseCancellation, setNoiseCancellation] = useState(true);
@@ -1137,9 +1166,13 @@ export default function App() {
     if (me?.id) clearCachedUser(me.id).catch(error => console.error('Unable to clear this account’s local cache:', error));
     localStorage.removeItem('nepa');
     setAuth(null);
+    setCacheLoadedFor('');
     setChats([]);
     setMessages([]);
     setActive(null);
+    setFriendData({ friends: [], incoming: [], outgoing: [] });
+    setActivityPosts([]);
+    setActivityComments({});
     setLocationShares([]);
   };
   const onAuth = d => { localStorage.setItem('nepa', JSON.stringify(d)); setAuth(d); };
@@ -1168,6 +1201,30 @@ export default function App() {
   }, [chats, me?.id]);
 
   useEffect(() => {
+    if (!me?.id || cacheLoadedFor !== me.id) return;
+    saveCachedFriends(me.id, friendData).catch(error => console.error('Unable to save friends to the local cache:', error));
+  }, [cacheLoadedFor, friendData, me?.id]);
+
+  useEffect(() => {
+    if (!me?.id || cacheLoadedFor !== me.id) return;
+    saveCachedActivity(me.id, activityPosts).catch(error => console.error('Unable to save activity posts to the local cache:', error));
+  }, [activityPosts, cacheLoadedFor, me?.id]);
+
+  useEffect(() => {
+    if (!me?.id || cacheLoadedFor !== me.id) return;
+    saveCachedActivityComments(me.id, activityComments).catch(error => console.error('Unable to save activity comments to the local cache:', error));
+  }, [activityComments, cacheLoadedFor, me?.id]);
+
+  useEffect(() => {
+    if (!me?.id || cacheLoadedFor !== me.id) return;
+    const settings = {
+      profile: { username: me.username, email: me.email, avatarPath: me.avatarPath || null },
+      publicConfig,
+    };
+    saveCachedSettings(me.id, settings).catch(error => console.error('Unable to save account settings to the local cache:', error));
+  }, [cacheLoadedFor, me?.username, me?.email, me?.avatarPath, publicConfig]);
+
+  useEffect(() => {
     if (!me?.id || !active?.id || messageChatIdRef.current !== active.id || !messages.length) return;
     saveCachedMessages(me.id, active.id, messages).catch(error => console.error('Unable to save messages to the local cache:', error));
   }, [active?.id, me?.id, messages]);
@@ -1189,20 +1246,43 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
-    call('/config').then(config => {
-      setPublicConfig(config);
-      if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
-      const notificationTarget = new URLSearchParams(window.location.search).get('notifications');
-      const sharedActivityId = new URLSearchParams(window.location.search).get('activity');
-      if (notificationTarget === 'friends') {
-        setActiveView('activity');
-        setFriendPanel('requests');
-      } else if (notificationTarget === 'activity' || sharedActivityId) {
-        setActiveView('activity');
-        if (sharedActivityId) activityTargetRef.current = sharedActivityId;
+    let current = true;
+    const loadConfig = async () => {
+      if (me?.id) {
+        try {
+          const settings = await loadCachedSettings(me.id);
+          if (current && settings?.publicConfig) setPublicConfig(settings.publicConfig);
+        } catch (error) {
+          console.error('Unable to load account settings from the local cache:', error);
+        }
       }
-    }).catch(() => {}).finally(() => setConfigLoaded(true));
-  }, []);
+      try {
+        const config = await call('/config');
+        if (!current) return;
+        setPublicConfig(config);
+        if (me?.id) saveCachedSettings(me.id, {
+          profile: { username: me.username, email: me.email, avatarPath: me.avatarPath || null },
+          publicConfig: config,
+        }).catch(error => console.error('Unable to save server settings to the local cache:', error));
+      } catch (error) {
+        console.error('Unable to refresh server settings:', error);
+      } finally {
+        if (current) setConfigLoaded(true);
+      }
+    };
+    loadConfig();
+    if (new URLSearchParams(window.location.search).has('callHistory')) setCallsOpen(true);
+    const notificationTarget = new URLSearchParams(window.location.search).get('notifications');
+    const sharedActivityId = new URLSearchParams(window.location.search).get('activity');
+    if (notificationTarget === 'friends') {
+      setActiveView('activity');
+      setFriendPanel('requests');
+    } else if (notificationTarget === 'activity' || sharedActivityId) {
+      setActiveView('activity');
+      if (sharedActivityId) activityTargetRef.current = sharedActivityId;
+    }
+    return () => { current = false; };
+  }, [me?.id]);
   useEffect(() => {
     if (!auth?.user?.id || !configLoaded || !publicConfig.pushNotificationsEnabled || !publicConfig.vapidPublicKey) return;
     const promptKey = `nepachat-notifications-asked:${auth.user.id}`;
@@ -1714,14 +1794,26 @@ export default function App() {
     })).catch(e => e.status === 401 && logout());
     let current = true;
     const loadChats = async () => {
-      try {
-        const cached = await loadCachedChats(me.id);
-        if (current && Array.isArray(cached)) {
-          setChats(cached.map(chat => ({ ...chat, other: { ...chat.other, online: false } })));
-        }
-      } catch (error) {
-        console.error('Unable to load chats from the local cache:', error);
+      const cacheLoads = await Promise.all([
+        loadCachedChats(me.id).catch(error => { console.error('Unable to load chats from the local cache:', error); return null; }),
+        loadCachedFriends(me.id).catch(error => { console.error('Unable to load friends from the local cache:', error); return null; }),
+        loadCachedActivity(me.id).catch(error => { console.error('Unable to load activity from the local cache:', error); return null; }),
+        loadCachedActivityComments(me.id).catch(error => { console.error('Unable to load activity comments from the local cache:', error); return null; }),
+      ]);
+      if (!current) return;
+      const [cachedChats, cachedFriends, cachedActivity, cachedComments] = cacheLoads;
+      if (Array.isArray(cachedChats)) {
+        setChats(cachedChats.map(chat => ({ ...chat, other: { ...chat.other, online: false } })));
       }
+      if (cachedFriends && Array.isArray(cachedFriends.friends)) {
+        setFriendData({
+          ...cachedFriends,
+          friends: cachedFriends.friends.map(friend => ({ ...friend, online: false })),
+        });
+      }
+      if (Array.isArray(cachedActivity)) setActivityPosts(cachedActivity);
+      if (cachedComments && typeof cachedComments === 'object') setActivityComments(cachedComments);
+      setCacheLoadedFor(me.id);
       try {
         const list = await call('/chats', token);
         if (!current) return;
@@ -1876,7 +1968,7 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
-    if (activeView !== 'activity' || !token) return;
+    if (activeView !== 'activity' || !token || cacheLoadedFor !== me?.id) return;
     let current = true;
     setActivityLoading(true);
     setActivityError('');
@@ -1902,7 +1994,7 @@ export default function App() {
       .catch(error => { if (current) setActivityError(error.message); })
       .finally(() => { if (current) setActivityLoading(false); });
     return () => { current = false; };
-  }, [activeView, token]);
+  }, [activeView, cacheLoadedFor, token, me?.id]);
   useEffect(() => {
     if (activeView !== 'activity' || !activityTargetRef.current || activityLoading) return;
     const frame = window.requestAnimationFrame(() => {
@@ -2238,7 +2330,7 @@ export default function App() {
         <b>Nepa<span>Chat</span></b>
         <div className="grow" />
         <small>@{me.username}</small>
-        {!isOnline && <small className="offline-indicator" role="status" title="Showing saved chats and messages">Offline</small>}
+        {!isOnline && <small className="offline-indicator" role="status" title="Showing data saved on this device">Offline · saved data</small>}
         <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}>⚙</button>
         {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
         {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
@@ -2439,7 +2531,7 @@ export default function App() {
       {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} />}
       {adminUsersOpen && <AdminUsers token={token} currentUserId={me.id} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
-      {callsOpen && <CallHistory token={token} onClose={() => setCallsOpen(false)} />}
+      {callsOpen && <CallHistory token={token} userId={me.id} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
       {profileOpen && <ProfileSettings me={me} token={token} onClose={() => setProfileOpen(false)} onUpdated={onProfileUpdated} />}
       {activityComposerOpen && <div className="modal activity-compose-modal" onClick={() => { if (!postingActivity) setActivityComposerOpen(false); }}>

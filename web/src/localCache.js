@@ -57,6 +57,16 @@ export const loadCachedChats = userId => read(`${userId}:chats`);
 export const saveCachedChats = (userId, chats) => write(`${userId}:chats`, chats);
 export const loadCachedMessages = (userId, chatId) => read(`${userId}:messages:${chatId}`);
 export const saveCachedMessages = (userId, chatId, messages) => write(`${userId}:messages:${chatId}`, messages);
+export const loadCachedFriends = userId => read(`${userId}:friends`);
+export const saveCachedFriends = (userId, friends) => write(`${userId}:friends`, friends);
+export const loadCachedActivity = userId => read(`${userId}:activity`);
+export const saveCachedActivity = (userId, posts) => write(`${userId}:activity`, posts);
+export const loadCachedActivityComments = userId => read(`${userId}:activity-comments`);
+export const saveCachedActivityComments = (userId, comments) => write(`${userId}:activity-comments`, comments);
+export const loadCachedSettings = userId => read(`${userId}:settings`);
+export const saveCachedSettings = (userId, settings) => write(`${userId}:settings`, settings);
+export const loadCachedCallHistory = userId => read(`${userId}:call-history`);
+export const saveCachedCallHistory = (userId, history) => write(`${userId}:call-history`, history);
 
 export const clearCachedUser = async userId => {
   const database = await openDatabase();
