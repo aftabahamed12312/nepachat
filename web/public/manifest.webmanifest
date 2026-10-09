@@ -1,7 +1,7 @@
 {
   "name": "NepaChat",
   "short_name": "NepaChat",
-  "description": "Private messaging and calls",
+  "description": "Real-time messaging, photo and video sharing, and audio and video calls.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

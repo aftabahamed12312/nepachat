@@ -14,7 +14,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const {
-  MONGO_URL = 'mongodb://mongo:27017/nepachat', JWT_SECRET = 'dev-secret', PORT = 4000, NODE_ENV = 'development',
+  MONGO_URL = 'mongodb://mongo:27017/nepachat', PORT = 4000, NODE_ENV = 'development',
   CORS_ORIGIN = '*', SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE = 'false', SMTP_USER,
   SMTP_PASS, SMTP_FROM, RESEND_API_KEY, RESEND_FROM,
   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN, GMAIL_FROM,
@@ -23,6 +23,15 @@ const {
   VAPID_PUBLIC_KEY: ENV_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY: ENV_VAPID_PRIVATE_KEY,
   VAPID_SUBJECT = 'mailto:admin@nepachat.pages.dev',
 } = process.env;
+const configuredJwtSecret = process.env.JWT_SECRET?.trim();
+if (NODE_ENV === 'production' && (
+  !configuredJwtSecret
+  || Buffer.byteLength(configuredJwtSecret) < 32
+  || /^(?:dev-secret$|change-me(?:-|$)|replace(?:-|_|\s)?me(?:-|$)|your(?:-|_|\s)?secret$|secret$)/i.test(configuredJwtSecret)
+)) {
+  throw new Error('JWT_SECRET must be set to a cryptographically random value of at least 32 bytes in production.');
+}
+const JWT_SECRET = configuredJwtSecret || randomBytes(32).toString('base64url');
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
