@@ -291,7 +291,7 @@ function LinkedDevices({ token, onClose, onAlert }) {
   );
 }
 
-function CallPanel({ callState, localStream, remoteStream, peerConnection, audioEnabled, videoEnabled, noiseCancellation, cameraSwitching, layout, onLayoutChange, onToggleAudio, onToggleVideo, onToggleNoiseCancellation, onSwitchCamera, onAccept, onDecline, onHangup }) {
+function CallPanel({ callState, setCallState, localStream, remoteStream, peerConnection, audioEnabled, videoEnabled, noiseCancellation, cameraSwitching, layout, onLayoutChange, onToggleAudio, onToggleVideo, onToggleNoiseCancellation, onSwitchCamera, onAccept, onDecline, onHangup }) {
   const localRef = useRef(), remoteRef = useRef();
   const panelRef = useRef();
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -2110,7 +2110,7 @@ export default function App() {
           {alerts.map(alert => <div key={alert.id} className={'alert-item alert-' + alert.kind}>{alert.message}</div>)}
         </div>
       )}
-      <CallPanel callState={callState} localStream={localStream} remoteStream={remoteStream} peerConnection={peerConnection} audioEnabled={audioEnabled} videoEnabled={videoEnabled} noiseCancellation={noiseCancellation} cameraSwitching={cameraSwitching} layout={callLayout} onLayoutChange={setCallLayout} onToggleAudio={toggleAudio} onToggleVideo={toggleVideo} onToggleNoiseCancellation={toggleNoiseCancellation} onSwitchCamera={switchCamera} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
+      <CallPanel callState={callState} setCallState={setCallState} localStream={localStream} remoteStream={remoteStream} peerConnection={peerConnection} audioEnabled={audioEnabled} videoEnabled={videoEnabled} noiseCancellation={noiseCancellation} cameraSwitching={cameraSwitching} layout={callLayout} onLayoutChange={setCallLayout} onToggleAudio={toggleAudio} onToggleVideo={toggleVideo} onToggleNoiseCancellation={toggleNoiseCancellation} onSwitchCamera={switchCamera} onAccept={acceptCall} onDecline={() => endCall('declined')} onHangup={() => endCall('ended')} />
     </div>
   );
 }
