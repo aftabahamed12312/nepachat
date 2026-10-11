@@ -208,7 +208,7 @@ function ActivityMediaItem({ attachment, onRefresh }) {
     </div>
   );
 }
-function ActivityFilePreview({ file, progress, onRemove, disabled }) {
+function ActivityFilePreview({ file, progress, statusText, onRemove, disabled }) {
   const [previewUrl, setPreviewUrl] = useState('');
   useEffect(() => {
     const url = URL.createObjectURL(file);
@@ -225,7 +225,7 @@ function ActivityFilePreview({ file, progress, onRemove, disabled }) {
         : <div className="activity-file-preview-loading">Preparing preview…</div>}
       <div className="activity-file-preview-info">
         <b>{file.name}</b>
-        <small>{(file.size / (1024 * 1024)).toFixed(1)} MB{progress !== undefined ? ` · Uploading ${progress}%` : ''}</small>
+        <small>{(file.size / (1024 * 1024)).toFixed(1)} MB{statusText ? ` · ${statusText}` : progress !== undefined ? ` · Uploading ${progress}%` : ''}</small>
         {progress !== undefined && <progress max="100" value={progress} aria-label={`Uploading ${file.name}`} />}
       </div>
       <button type="button" disabled={disabled} aria-label={`Remove ${file.name}`} onClick={onRemove}>×</button>
@@ -903,7 +903,12 @@ function ProfileSettings({ me, token, onClose, onUpdated }) {
   return (
     <div className="modal" onClick={() => { if (!saving) onClose(); }}>
       <form className="sheet profile-sheet" onClick={event => event.stopPropagation()} onSubmit={save}>
-        <div className="profile-heading"><h3>Profile settings</h3><button type="button" aria-label="Close profile settings" disabled={saving} onClick={onClose}>×</button></div>
+        <div className="profile-heading"><h3>Your profile</h3><button type="button" aria-label="Close profile settings" disabled={saving} onClick={onClose}>×</button></div>
+        <div className="profile-account-summary">
+          <b>@{me.username}</b>
+          <span className="profile-role">{me.role === 'admin' ? 'Administrator' : 'Member'}</span>
+          <small>{me.email}</small>
+        </div>
         <div className="profile-picture-setting">
           <div className="avatar profile-avatar">
             {(preview || me.avatarPath) && <img key={preview || me.avatarPath} src={preview || (API + me.avatarPath)} alt="" onError={event => { event.currentTarget.style.display = 'none'; }} />}
@@ -1045,12 +1050,13 @@ export default function App() {
   }
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, emailVerificationEnabled: false, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
-  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
+  const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [profileMenuOpen, setProfileMenuOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]), [chatCalls, setChatCalls] = useState([]);
   const [activeView, setActiveView] = useState(() => initialPageState.current?.activeView === 'activity' ? 'activity' : 'chats'), [activityPosts, setActivityPosts] = useState([]);
   const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
   const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
   const [activityUploadProgress, setActivityUploadProgress] = useState({});
+  const [activityUploadedAttachments, setActivityUploadedAttachments] = useState({});
   const [activityComposerOpen, setActivityComposerOpen] = useState(false);
   const [activityComments, setActivityComments] = useState({});
   const [activityCommentDrafts, setActivityCommentDrafts] = useState({});
@@ -1081,7 +1087,7 @@ export default function App() {
   const [cameraFacing, setCameraFacing] = useState('user');
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const endRef = useRef(), listScrollRef = useRef(), activityScrollRef = useRef(), messagesScrollRef = useRef(), pendingMessageScrollRef = useRef(null), preserveMessagePositionRef = useRef(''), pageRestoreReadyRef = useRef(false), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const endRef = useRef(), listScrollRef = useRef(), activityScrollRef = useRef(), messagesScrollRef = useRef(), profileMenuRef = useRef(null), pendingMessageScrollRef = useRef(null), preserveMessagePositionRef = useRef(''), pageRestoreReadyRef = useRef(false), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   const callAudioContextRef = useRef(null), callToneRef = useRef(null), connectedToneCallRef = useRef('');
   const backStateRef = useRef(null);
   const activityCommentPostRef = useRef(activityCommentPostId);
@@ -1089,7 +1095,7 @@ export default function App() {
   activeViewRef.current = activeView;
   activityCommentPostRef.current = activityCommentPostId;
   callRef.current = callState;
-  backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
+  backStateRef.current = { active, activeView, adminModal, adminUsersOpen, callsOpen, locationModal, profileOpen, profileMenuOpen, linkedDevicesOpen, modal, activityComposerOpen, friendPanel, notificationPromptOpen };
   const token = auth?.token, me = auth?.user;
   const sendingRef = useRef(false);
   const prepareCallAudio = () => {
@@ -1457,6 +1463,7 @@ export default function App() {
       else if (state?.notificationPromptOpen) dismissNotificationPrompt();
       else if (state?.locationModal) setLocationModal(false);
       else if (state?.profileOpen) setProfileOpen(false);
+      else if (state?.profileMenuOpen) setProfileMenuOpen(false);
       else if (state?.adminUsersOpen) setAdminUsersOpen(false);
       else if (state?.adminModal) setAdminModal(false);
       else if (state?.callsOpen) setCallsOpen(false);
@@ -1470,6 +1477,20 @@ export default function App() {
     window.addEventListener('popstate', handleBackNavigation);
     return () => window.removeEventListener('popstate', handleBackNavigation);
   }, [Boolean(auth)]);
+  useEffect(() => {
+    if (!profileMenuOpen) return undefined;
+    const closeMenu = event => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return;
+      if (event.type === 'pointerdown' && profileMenuRef.current?.contains(event.target)) return;
+      setProfileMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', closeMenu);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu);
+      document.removeEventListener('keydown', closeMenu);
+    };
+  }, [profileMenuOpen]);
   const addAlert = (message, kind = 'info') => {
     const next = { id: `${Date.now()}-${Math.random()}`, message, kind };
     setAlerts(current => [...current, next]);
@@ -1554,7 +1575,7 @@ export default function App() {
     return new Promise((resolve, reject) => {
       const request = new XMLHttpRequest();
       request.open('PUT', `${API}${chatId ? `/api/chats/${chatId}/uploads` : '/api/activity/uploads'}`);
-      request.timeout = 120000;
+      request.timeout = 300000;
       request.setRequestHeader('Authorization', 'Bearer ' + token);
       request.setRequestHeader('Content-Type', fileType);
       request.setRequestHeader('X-File-Type', fileType);
@@ -1569,15 +1590,19 @@ export default function App() {
           }));
         }
       };
-      request.onerror = () => reject(new Error('Upload failed. Check your connection and try again.'));
+      request.onerror = () => reject(new Error('Could not reach the upload server. Check your connection and try again.'));
       request.onabort = () => reject(new Error('Upload was cancelled.'));
-      request.ontimeout = () => reject(new Error('Upload timed out. Check your connection and try again.'));
+      request.ontimeout = () => reject(new Error('Upload timed out after 5 minutes. Check your connection and try again.'));
       request.onload = () => {
         let data = {};
         try { data = JSON.parse(request.responseText || '{}'); } catch { /* handled as a failed response below */ }
         if (request.status < 200 || request.status >= 300) {
           const message = request.status === 404
             ? 'The API server is missing the upload endpoint. Redeploy the latest server code, then try again.'
+            : request.status === 413
+              ? 'The upload server rejected this file as too large. Choose a file under 25 MB.'
+              : request.status === 401
+                ? 'Your session has expired. Sign in again and retry the upload.'
             : data.error || `Upload failed (${request.status || 'network error'})`;
           reject(new Error(message));
           return;
@@ -2335,18 +2360,31 @@ export default function App() {
     setPostingActivity(true);
     setActivityError('');
     try {
-      const attachments = await Promise.all(files.map(async file => {
+      const attachments = [];
+      for (const file of files) {
         const key = attachmentKey(file);
+        const cached = activityUploadedAttachments[key];
+        if (cached?.status === 'done' && cached.attachment) {
+          attachments.push(cached.attachment);
+          continue;
+        }
         setActivityUploadProgress(current => ({ ...current, [key]: 0 }));
-        const attachment = await uploadAttachment(file, null, progress => setActivityUploadProgress(current => ({ ...current, [key]: progress })));
-        setActivityUploadProgress(current => ({ ...current, [key]: 100 }));
-        return attachment;
-      }));
+        try {
+          const attachment = await uploadAttachment(file, null, progress => setActivityUploadProgress(current => ({ ...current, [key]: progress })));
+          setActivityUploadProgress(current => ({ ...current, [key]: 100 }));
+          setActivityUploadedAttachments(current => ({ ...current, [key]: { status: 'done', attachment } }));
+          attachments.push(attachment);
+        } catch (error) {
+          setActivityUploadedAttachments(current => ({ ...current, [key]: { status: 'error', message: error.message } }));
+          throw error;
+        }
+      }
       const post = await call('/activity/posts', token, 'POST', { text, attachments });
       setActivityPosts(current => [post, ...current.filter(item => item.id !== post.id)].slice(0, 50));
       setActivityText('');
       setActivityFiles([]);
       setActivityUploadProgress({});
+      setActivityUploadedAttachments({});
       setActivityComposerOpen(false);
     } catch (error) {
       setActivityError(error.message || 'Unable to publish this post.');
@@ -2511,23 +2549,24 @@ export default function App() {
     const payload = { text: t, attachments: [], replyTo: replyingTo?.id || null };
     setText(''); setReplyingTo(null); setComposeError('');
     try {
-      const results = await Promise.allSettled(files.map(async file => {
+      payload.attachments = [];
+      for (const file of files) {
         const key = attachmentKey(file);
         const cached = uploadState[key];
-        if (cached?.status === 'done' && cached.attachment) return cached.attachment;
+        if (cached?.status === 'done' && cached.attachment) {
+          payload.attachments.push(cached.attachment);
+          continue;
+        }
         setUploadState(current => ({ ...current, [key]: { status: 'uploading', progress: 0 } }));
         try {
           const attachment = await uploadAttachment(file, chat.id);
           setUploadState(current => ({ ...current, [key]: { status: 'done', progress: 100, attachment } }));
-          return attachment;
+          payload.attachments.push(attachment);
         } catch (error) {
           setUploadState(current => ({ ...current, [key]: { status: 'error', message: error.message } }));
           throw error;
         }
-      }));
-      const failedUpload = results.find(result => result.status === 'rejected');
-      if (failedUpload) throw failedUpload.reason;
-      payload.attachments = results.map(result => result.value);
+      }
       await call(`/chats/${chat.id}/messages`, token, 'POST', payload);
       setAttachedFiles([]);
       setUploadState({});
@@ -2554,22 +2593,29 @@ export default function App() {
     <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
       <header className="top">
         <b>Nepa<span>Chat</span></b>
+        <nav className="header-tabs" aria-label="Main navigation">
+          <button className={activeView === 'chats' ? 'selected' : ''} aria-current={activeView === 'chats' ? 'page' : undefined} onClick={() => selectView('chats')}><MessageOutlined /> <span>Chats</span></button>
+          <button className={activeView === 'activity' ? 'selected' : ''} aria-current={activeView === 'activity' ? 'page' : undefined} onClick={() => selectView('activity')}><TeamOutlined /> <span>Activity</span></button>
+        </nav>
         <div className="grow" />
-        <small>@{me.username}</small>
         {!isOnline && <small className="offline-indicator" role="status" title="Showing data saved on this device">Offline · saved data</small>}
-        <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}><SettingOutlined /></button>
-        {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}><TeamOutlined /></button>}
-        {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}><UserAddOutlined /></button>}
-        <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}><HistoryOutlined /></button>
-        <button className="hbtn" title="Linked devices" aria-label="Linked devices" onClick={() => setLinkedDevicesOpen(true)}><MobileOutlined /></button>
-        <button className="hbtn" title="New chat" aria-label="New chat" onClick={() => setModal(true)}><PlusOutlined /></button>
-        <button className="hbtn" title="Sign out" aria-label="Sign out" onClick={logout}><LogoutOutlined /></button>
+        <div className="profile-menu-wrap" ref={profileMenuRef}>
+          <button className="top-profile-button" title={`Profile and tools for @${me.username}`} aria-label={`Open profile menu for @${me.username}`} aria-haspopup="menu" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen(current => !current)}>
+            <Avatar name={me.username} avatarPath={me.avatarPath} />
+          </button>
+          {profileMenuOpen && <div className="profile-menu" role="menu" aria-label="Profile and tools">
+            <div className="profile-menu-user"><Avatar name={me.username} avatarPath={me.avatarPath} /><div><b>@{me.username}</b><small>{me.email}</small></div></div>
+            <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setProfileOpen(true); }}><SettingOutlined /> <span>Profile settings</span></button>
+            {me.role === 'admin' && <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setAdminUsersOpen(true); }}><TeamOutlined /> <span>View users</span></button>}
+            {me.role === 'admin' && <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setAdminModal(true); }}><UserAddOutlined /> <span>Create account</span></button>}
+            <button role="menuitem" onClick={() => { setProfileMenuOpen(false); showCallHistory(); }}><HistoryOutlined /> <span>Call history</span></button>
+            <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setLinkedDevicesOpen(true); }}><MobileOutlined /> <span>Linked devices</span></button>
+            <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal(true); }}><PlusOutlined /> <span>New chat</span></button>
+            <button className="profile-menu-signout" role="menuitem" onClick={() => { setProfileMenuOpen(false); logout(); }}><LogoutOutlined /> <span>Sign out</span></button>
+          </div>}
+        </div>
       </header>
       <aside className="side">
-        <nav className="side-nav" aria-label="Main navigation">
-          <button className={activeView === 'chats' ? 'selected' : ''} onClick={() => selectView('chats')}><MessageOutlined /> Chats</button>
-          <button className={activeView === 'activity' ? 'selected' : ''} onClick={() => selectView('activity')}><TeamOutlined /> Activity</button>
-        </nav>
         {activeView === 'chats' && <>
           <label className="search-wrap"><SearchOutlined aria-hidden="true" /><input className="search" aria-label="Search chats" placeholder="Search or start a new chat" value={filter} onChange={e => setFilter(e.target.value)} /></label>
           <div className="list" ref={listScrollRef} onScroll={event => savePageScroll('listScrollTop', event.currentTarget.scrollTop)}>
@@ -2749,18 +2795,16 @@ export default function App() {
               </article>)}
             <div ref={endRef} />
           </div>
-          {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => {
+          {attachedFiles.length > 0 && <div className="chat-file-previews">{attachedFiles.map((file, index) => {
             const key = attachmentKey(file);
             const state = uploadState[key] || {};
-            const suffix = state.status === 'uploading' ? `Uploading ${state.progress || 0}%` : state.status === 'error' ? state.message || 'Upload failed' : state.status === 'done' ? 'Ready to send' : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
-            return <span key={key} className={state.status === 'error' ? 'upload-error' : ''} aria-label={`${file.name}: ${suffix}`}>
-              <b>{file.name}</b><small>{suffix}</small>
-              {state.status === 'uploading' && <progress max="100" value={state.progress || 0} aria-label={`Uploading ${file.name}`} />}
-              <button disabled={isSending} aria-label={`Remove ${file.name}`} onClick={() => {
+            const statusText = state.status === 'uploading' ? `Uploading ${state.progress || 0}%`
+              : state.status === 'error' ? state.message || 'Upload failed'
+                : state.status === 'done' ? 'Ready to send' : '';
+            return <ActivityFilePreview key={key} file={file} statusText={statusText} progress={state.status === 'uploading' ? state.progress || 0 : undefined} disabled={isSending} onRemove={() => {
                 setAttachedFiles(current => current.filter((_, i) => i !== index));
                 setUploadState(current => { const next = { ...current }; delete next[key]; return next; });
-              }}><CloseOutlined /></button>
-            </span>;
+              }} />;
           })}</div>}
           {replyingTo && <div className="reply-box"><div className="reply-meta">Replying to @{messages.find(item => item.id === replyingTo.id)?.from === me.id ? 'you' : active.other.username}</div><div className="reply-preview">{replyingTo.text || 'Shared media'}</div><button className="text-button" onClick={() => setReplyingTo(null)}>Cancel</button></div>}
           {composeError && <div className="inline-error">{composeError}</div>}
