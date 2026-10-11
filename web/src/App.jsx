@@ -2401,13 +2401,9 @@ export default function App() {
     return updatedAttachment.url;
   };
   const refreshMessageAttachment = async (chatId, attachmentKey) => {
-    const updatedMessages = await call(`/chats/${chatId}/messages`, token);
-    if (activeRef.current?.id === chatId) setMessages(updatedMessages);
-    const updatedAttachment = updatedMessages
-      .flatMap(message => message.attachments || [])
-      .find(item => item.key === attachmentKey);
-    if (!updatedAttachment?.url) throw new Error('This media is no longer available.');
-    return updatedAttachment.url;
+    const { url } = await call(`/chats/${chatId}/media-url?key=${encodeURIComponent(attachmentKey)}`, token);
+    if (!url) throw new Error('This media is no longer available.');
+    return url;
   };
   const toggleActivityLike = async post => {
     if (activityLikeUpdating) return;

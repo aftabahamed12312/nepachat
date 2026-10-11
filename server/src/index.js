@@ -409,15 +409,13 @@ const attachmentUrlFromKey = (req, key, viewerId = req?.uid) => {
   return `${base.replace(/\/$/, '')}/api/media?${query}`;
 };
 
+const attachmentUrl = (req, attachment, viewerId = req.uid) => r2Configured
+  ? getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 })
+  : Promise.resolve(attachmentUrlFromKey(req, attachment.key, viewerId));
+
 async function messageView(message, req, viewerId = req.uid) {
   const attachments = await Promise.all((message.attachments || []).map(async attachment => {
-    const normalized = { ...attachment };
-    if (r2Configured) {
-      normalized.url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 });
-    } else {
-      normalized.url = attachmentUrlFromKey(req, attachment.key, viewerId);
-    }
-    return normalized;
+    return { ...attachment, url: await attachmentUrl(req, attachment, viewerId) };
   }));
   let replyTo = null;
   if (message.replyTo) {
@@ -1575,11 +1573,25 @@ app.get('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const chat = await member(req.params.id, req.uid);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
   const peerId = chat.members.find(id => id !== req.uid);
-  const list = await msgs.find({ chatId: req.params.id }).sort({ ts: 1 }).limit(500).toArray();
+  const list = await msgs.find({ chatId: req.params.id }).sort({ ts: -1, _id: -1 }).limit(500).toArray();
+  list.reverse();
   res.json(await Promise.all(list.map(async m => ({
     ...await messageView(m, req),
     status: m.from === req.uid ? m.readBy?.includes(peerId) ? 'read' : m.deliveredTo?.includes(peerId) ? 'delivered' : 'sent' : undefined,
   }))));
+}));
+
+app.get('/api/chats/:id/media-url', auth, wrap(async (req, res) => {
+  const chat = await member(req.params.id, req.uid);
+  if (!chat) return res.status(404).json({ error: 'Chat not found' });
+  const key = String(req.query.key || '');
+  const message = key && await msgs.findOne(
+    { chatId: req.params.id, attachments: { $elemMatch: { key } } },
+    { projection: { _id: 1, attachments: 1 } },
+  );
+  const attachment = message?.attachments?.find(item => item.key === key);
+  if (!attachment) return res.status(404).json({ error: 'Media is no longer available' });
+  res.json({ url: await attachmentUrl(req, attachment) });
 }));
 
 app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
