@@ -40,6 +40,7 @@ import {
   SettingOutlined,
   ShareAltOutlined,
   SendOutlined,
+  StopOutlined,
   TeamOutlined,
   UserAddOutlined,
   UsergroupAddOutlined,
@@ -961,6 +962,52 @@ function CallHistory({ token, userId, chats, onOpenChat, onClose }) {
     </div>
   );
 }
+function ChatMediaItem({ attachment, onRefresh }) {
+  const [url, setUrl] = useState(attachment.url);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const refreshing = useRef(false);
+  const refreshed = useRef(false);
+  useEffect(() => {
+    setUrl(attachment.url);
+    setFailed(false);
+    setAttempt(0);
+    refreshing.current = false;
+    refreshed.current = false;
+  }, [attachment.url]);
+  const refresh = async automatic => {
+    if (refreshing.current) return;
+    if (automatic && refreshed.current) {
+      setFailed(true);
+      return;
+    }
+    refreshing.current = true;
+    if (automatic) refreshed.current = true;
+    try {
+      const nextUrl = await onRefresh();
+      if (!nextUrl) {
+        setFailed(true);
+        return;
+      }
+      setUrl(nextUrl);
+      setAttempt(current => current + 1);
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    } finally {
+      refreshing.current = false;
+    }
+  };
+  if (failed) return (
+    <div className="chat-media-error" role="status">
+      <span>{attachment.name || 'Media'} couldn’t be loaded.</span>
+      <button type="button" onClick={() => { refreshed.current = false; refresh(false); }}><ReloadOutlined /> Try again</button>
+    </div>
+  );
+  return attachment.type.startsWith('image/')
+    ? <a className="attachment-link" href={url} target="_blank" rel="noreferrer"><img key={`${url}-${attempt}`} className="message-image" src={url} alt={attachment.name} loading="lazy" onError={() => refresh(true)} /></a>
+    : <video key={`${url}-${attempt}`} className="message-video" src={url} controls playsInline preload="metadata" onError={() => refresh(true)} />;
+}
 
 function LocationShareDialog({ onStart, onClose }) {
   const [duration, setDuration] = useState(3600), [error, setError] = useState('');
@@ -987,11 +1034,20 @@ function LocationShareDialog({ onStart, onClose }) {
 
 export default function App() {
   const [auth, setAuth] = useState(() => JSON.parse(localStorage.getItem('nepa') || 'null'));
+  const initialPageState = useRef(null);
+  if (initialPageState.current === null && auth?.user?.id) {
+    try {
+      initialPageState.current = JSON.parse(sessionStorage.getItem(`nepachat-page:${auth.user.id}`) || 'null');
+    } catch (error) {
+      console.warn('Unable to restore this account’s page position:', error);
+      initialPageState.current = {};
+    }
+  }
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, emailVerificationEnabled: false, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
   const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]), [chatCalls, setChatCalls] = useState([]);
-  const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
+  const [activeView, setActiveView] = useState(() => initialPageState.current?.activeView === 'activity' ? 'activity' : 'chats'), [activityPosts, setActivityPosts] = useState([]);
   const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
   const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
   const [activityUploadProgress, setActivityUploadProgress] = useState({});
@@ -1004,7 +1060,7 @@ export default function App() {
   const [activityCommentSubmitting, setActivityCommentSubmitting] = useState('');
   const [activityLikeUpdating, setActivityLikeUpdating] = useState('');
   const activityTargetRef = useRef('');
-  const [friendData, setFriendData] = useState({ friends: [], incoming: [], outgoing: [] });
+  const [friendData, setFriendData] = useState({ friends: [], incoming: [], outgoing: [], blocked: [] });
   const [friendPanel, setFriendPanel] = useState('');
   const [friendQuery, setFriendQuery] = useState('');
   const [friendSearchResults, setFriendSearchResults] = useState([]);
@@ -1025,7 +1081,7 @@ export default function App() {
   const [cameraFacing, setCameraFacing] = useState('user');
   const [callLayout, setCallLayout] = useState('overlay');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const endRef = useRef(), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
+  const endRef = useRef(), listScrollRef = useRef(), activityScrollRef = useRef(), messagesScrollRef = useRef(), pendingMessageScrollRef = useRef(null), preserveMessagePositionRef = useRef(''), pageRestoreReadyRef = useRef(false), fileInputRef = useRef(), activityInputRef = useRef(), activeRef = useRef(), activeViewRef = useRef(activeView), messageChatIdRef = useRef(null), socketRef = useRef(), peerRef = useRef(), localStreamRef = useRef(), callRef = useRef(), pendingCandidatesRef = useRef([]), locationWatchRef = useRef(null), locationTimerRef = useRef(null), lastLocationUpdateRef = useRef(0);
   const callAudioContextRef = useRef(null), callToneRef = useRef(null), connectedToneCallRef = useRef('');
   const backStateRef = useRef(null);
   const activityCommentPostRef = useRef(activityCommentPostId);
@@ -1199,7 +1255,9 @@ export default function App() {
     setMessages([]);
     setChatCalls([]);
     setActive(null);
-    setFriendData({ friends: [], incoming: [], outgoing: [] });
+    setFriendData({ friends: [], incoming: [], outgoing: [], blocked: [] });
+    pageRestoreReadyRef.current = false;
+    if (me?.id) sessionStorage.removeItem(`nepachat-page:${me.id}`);
     setActivityPosts([]);
     setActivityComments({});
     setLocationShares([]);
@@ -1246,6 +1304,58 @@ export default function App() {
     if (!me?.id || cacheLoadedFor !== me.id) return;
     saveCachedActivityComments(me.id, activityComments).catch(error => console.error('Unable to save activity comments to the local cache:', error));
   }, [activityComments, cacheLoadedFor, me?.id]);
+
+  useEffect(() => {
+    if (!me?.id || !pageRestoreReadyRef.current) return;
+    const previous = initialPageState.current || {};
+    try {
+      sessionStorage.setItem(`nepachat-page:${me.id}`, JSON.stringify({
+        ...previous,
+        activeView,
+        activeChatId: active?.id || '',
+      }));
+      initialPageState.current = { ...previous, activeView, activeChatId: active?.id || '' };
+    } catch (error) {
+      console.warn('Unable to save this account’s page position:', error);
+    }
+  }, [active?.id, activeView, me?.id]);
+
+  const savePageScroll = (key, value) => {
+    if (!me?.id || !pageRestoreReadyRef.current) return;
+    const previous = initialPageState.current || {};
+    const next = { ...previous, [key]: value };
+    try {
+      sessionStorage.setItem(`nepachat-page:${me.id}`, JSON.stringify(next));
+      initialPageState.current = next;
+    } catch (error) {
+      console.warn('Unable to save this account’s scroll position:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (!me?.id || activeView !== 'chats' || !listScrollRef.current) return;
+    const savedTop = Number(initialPageState.current?.listScrollTop);
+    if (Number.isFinite(savedTop)) listScrollRef.current.scrollTop = savedTop;
+  }, [activeView, chats.length, me?.id]);
+  useEffect(() => {
+    if (!me?.id || activeView !== 'activity' || !activityScrollRef.current) return;
+    const savedTop = Number(initialPageState.current?.activityScrollTop);
+    if (Number.isFinite(savedTop)) activityScrollRef.current.scrollTop = savedTop;
+  }, [activeView, activityPosts.length, me?.id]);
+  useEffect(() => {
+    if (!active?.id || !messagesScrollRef.current) return;
+    const pending = pendingMessageScrollRef.current;
+    if (pending?.chatId === active.id) {
+      if (messages.length || pending.scrollTop === 0) {
+        messagesScrollRef.current.scrollTop = pending.scrollTop;
+        pendingMessageScrollRef.current = null;
+        preserveMessagePositionRef.current = active.id;
+      }
+      return;
+    }
+    if (preserveMessagePositionRef.current === active.id) return;
+    endRef.current?.scrollIntoView();
+  }, [active?.id, messages, chatCalls]);
 
   useEffect(() => {
     if (!me?.id || cacheLoadedFor !== me.id) return;
@@ -1841,6 +1951,7 @@ export default function App() {
         setFriendData({
           ...cachedFriends,
           friends: cachedFriends.friends.map(friend => ({ ...friend, online: false })),
+          blocked: Array.isArray(cachedFriends.blocked) ? cachedFriends.blocked : [],
         });
       }
       if (Array.isArray(cachedActivity)) setActivityPosts(cachedActivity);
@@ -1857,8 +1968,23 @@ export default function App() {
           setActiveView('chats');
           setActive(targetChat);
           history.replaceState(null, '', window.location.pathname);
+        } else {
+          const savedChat = initialPageState.current?.activeView !== 'activity'
+            && initialPageState.current?.activeChatId
+            && list.find(item => item.id === initialPageState.current.activeChatId);
+          if (savedChat) {
+            pendingMessageScrollRef.current = {
+              chatId: savedChat.id,
+              scrollTop: Number(initialPageState.current?.messagesScrollTop) || 0,
+            };
+            setActive(savedChat);
+          } else if (initialPageState.current?.activeChatId) {
+            initialPageState.current = { ...initialPageState.current, activeChatId: '' };
+          }
         }
+        pageRestoreReadyRef.current = true;
       } catch (error) {
+        pageRestoreReadyRef.current = true;
         if (error.status === 401) logout();
         else console.error('Unable to refresh chats:', error);
       }
@@ -2090,8 +2216,6 @@ export default function App() {
     call(`/chats/${active.id}/location-shares`, token).then(shares => setLocationShares(current => [...current.filter(item => item.chatId !== active.id), ...shares])).catch(() => {});
     return () => { current = false; };
   }, [active?.id, token, me?.id]);
-  useEffect(() => { endRef.current?.scrollIntoView(); }, [messages, chatCalls]);
-
   const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActiveView('chats'); setActive(c); };
   const openChatFromHistory = chatId => {
     const chat = chats.find(item => item.id === chatId);
@@ -2136,6 +2260,50 @@ export default function App() {
         const posts = await call('/activity/posts', token);
         setActivityPosts(posts);
       }
+    } catch (error) {
+      setFriendError(error.message);
+    } finally {
+      setFriendActionId('');
+    }
+  };
+  const removeFriend = async friend => {
+    if (!window.confirm(`Remove @${friend.username} from your friends?`)) return;
+    setFriendError('');
+    setFriendActionId(friend.id);
+    try {
+      await call(`/friends/${friend.id}`, token, 'DELETE');
+      await refreshFriendData();
+    } catch (error) {
+      setFriendError(error.message);
+    } finally {
+      setFriendActionId('');
+    }
+  };
+  const blockFriend = async user => {
+    if (!window.confirm(`Block @${user.username}? They will no longer be able to connect or chat with you.`)) return;
+    setFriendError('');
+    setFriendActionId(user.id);
+    try {
+      await call(`/friends/${user.id}/block`, token, 'POST');
+      await refreshFriendData();
+      const list = await call('/chats', token);
+      setChats(list);
+      if (activeRef.current?.other.id === user.id) {
+        setActive(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      setFriendError(error.message);
+    } finally {
+      setFriendActionId('');
+    }
+  };
+  const unblockFriend = async user => {
+    setFriendError('');
+    setFriendActionId(user.id);
+    try {
+      await call(`/friends/${user.id}/block`, token, 'DELETE');
+      await refreshFriendData();
     } catch (error) {
       setFriendError(error.message);
     } finally {
@@ -2192,6 +2360,15 @@ export default function App() {
     const updatedAttachment = updatedPost?.attachments?.find(item => item.key === attachmentKey);
     if (!updatedAttachment?.url) throw new Error('This media is no longer available.');
     setActivityPosts(current => current.map(post => post.id === postId ? updatedPost : post));
+    return updatedAttachment.url;
+  };
+  const refreshMessageAttachment = async (chatId, attachmentKey) => {
+    const updatedMessages = await call(`/chats/${chatId}/messages`, token);
+    if (activeRef.current?.id === chatId) setMessages(updatedMessages);
+    const updatedAttachment = updatedMessages
+      .flatMap(message => message.attachments || [])
+      .find(item => item.key === attachmentKey);
+    if (!updatedAttachment?.url) throw new Error('This media is no longer available.');
     return updatedAttachment.url;
   };
   const toggleActivityLike = async post => {
@@ -2395,7 +2572,7 @@ export default function App() {
         </nav>
         {activeView === 'chats' && <>
           <label className="search-wrap"><SearchOutlined aria-hidden="true" /><input className="search" aria-label="Search chats" placeholder="Search or start a new chat" value={filter} onChange={e => setFilter(e.target.value)} /></label>
-          <div className="list">
+          <div className="list" ref={listScrollRef} onScroll={event => savePageScroll('listScrollTop', event.currentTarget.scrollTop)}>
             {!shown.length && <p className="muted pad">No chats yet. Tap <PlusOutlined /> to start one.</p>}
             {shown.map(c => (
               <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => { setActiveView('chats'); setActive(c); }}>
@@ -2412,7 +2589,7 @@ export default function App() {
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setIsDraggingFiles(false); }}
         onDrop={handleFileDrop}>
         {isDraggingFiles && <div className="drop-overlay" aria-hidden="true">{activeView === 'activity' ? 'Drop photos/videos to add to your post' : 'Drop images or videos to attach'}</div>}
-        {activeView === 'activity' ? <div className="activity-page">
+        {activeView === 'activity' ? <div className="activity-page" ref={activityScrollRef} onScroll={event => savePageScroll('activityScrollTop', event.currentTarget.scrollTop)}>
           <div className="activity-heading">
             <button className="activity-back" onClick={() => selectView('chats')}>← Chats</button>
             <h2 className="activity-title"><span className="activity-title-icon"><TeamOutlined /></span>Activity</h2>
@@ -2425,11 +2602,14 @@ export default function App() {
               <button className={friendPanel === 'friends' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'friends' ? '' : 'friends'); setFriendError(''); }}>
                 <TeamOutlined /> Friends{friendData.friends.length > 0 && <span>{friendData.friends.length}</span>}
               </button>
+              <button className={friendPanel === 'blocked' ? 'selected' : ''} onClick={() => { setFriendPanel(friendPanel === 'blocked' ? '' : 'blocked'); setFriendError(''); }}>
+                <StopOutlined /> Blocked{friendData.blocked.length > 0 && <span>{friendData.blocked.length}</span>}
+              </button>
             </div>
           </div>
           {friendPanel && <section className="friend-panel">
             <div className="friend-panel-heading">
-              <h3>{friendPanel === 'discover' ? 'Find people' : friendPanel === 'requests' ? 'Friend requests' : 'Your friends'}</h3>
+              <h3>{friendPanel === 'discover' ? 'Find people' : friendPanel === 'requests' ? 'Friend requests' : friendPanel === 'blocked' ? 'Blocked users' : 'Your friends'}</h3>
               <button aria-label="Close friends panel" onClick={() => { setFriendPanel(''); setFriendError(''); }}><CloseOutlined /></button>
             </div>
             {friendError && <p className="err">{friendError}</p>}
@@ -2438,15 +2618,18 @@ export default function App() {
               {friendQuery.trim().length < 2 && <p className="muted">Enter at least 2 characters to find someone.</p>}
               {friendSearchResults.map(user => {
                 const isFriend = friendData.friends.some(friend => friend.id === user.id);
+                const isBlocked = friendData.blocked.some(blocked => blocked.id === user.id);
                 const incoming = friendData.incoming.find(request => request.user.id === user.id);
                 const outgoing = friendData.outgoing.some(request => request.user.id === user.id);
                 return <div className="friend-row" key={user.id}>
                   <Avatar name={user.username} />
                   <div className="grow"><b>@{user.username}</b><small>{user.email}</small></div>
-                  {isFriend ? <span className="friend-status">Friends</span>
+                  {isBlocked ? <button className="btn" disabled={friendActionId === user.id} onClick={() => unblockFriend(user)}>Unblock</button>
+                    : isFriend ? <span className="friend-status">Friends</span>
                     : incoming ? <button className="btn" disabled={friendActionId === incoming.id} onClick={() => respondToFriendRequest(incoming, 'accept')}>Accept request</button>
                       : outgoing ? <span className="friend-status">Request sent</span>
                         : <button className="btn" disabled={friendActionId === user.id} onClick={() => sendFriendRequest(user)}>{friendActionId === user.id ? 'Sending…' : 'Add friend'}</button>}
+                  {!isBlocked && <button className="friend-decline" disabled={friendActionId === user.id} onClick={() => blockFriend(user)}>Block</button>}
                 </div>;
               })}
             </>}
@@ -2474,6 +2657,16 @@ export default function App() {
                 <div className="grow"><b>{friend.username}</b><small className="presence-label">{presenceLabel(friend)} · {friend.email}</small></div>
                 <span className="friend-status">Friends</span>
                 <button className="btn" onClick={() => openFriendChat(friend)}>Message</button>
+                <button className="friend-decline" disabled={friendActionId === friend.id} onClick={() => removeFriend(friend)}>Remove</button>
+                <button className="friend-decline" disabled={friendActionId === friend.id} onClick={() => blockFriend(friend)}>Block</button>
+              </div>)}
+            </>}
+            {friendPanel === 'blocked' && <>
+              {!friendData.blocked.length && <p className="muted">No blocked users.</p>}
+              {friendData.blocked.map(user => <div className="friend-row" key={user.id}>
+                <Avatar name={user.username} avatarPath={user.avatarPath} />
+                <div className="grow"><b>{user.username}</b><small>{user.email}</small></div>
+                <button className="btn" disabled={friendActionId === user.id} onClick={() => unblockFriend(user)}>Unblock</button>
               </div>)}
             </>}
           </section>}
@@ -2533,14 +2726,16 @@ export default function App() {
             {share.ownerId === me.id && <button className="text-button" onClick={() => stopLocationShare(share)}>Stop</button>}
           </div>)}
           {locationError && <div className="inline-error">{locationError}</div>}
-          <div className="msgs">
+          <div className="msgs" ref={messagesScrollRef} onScroll={event => {
+            const element = event.currentTarget;
+            if (element.scrollHeight - element.scrollTop - element.clientHeight < 24) preserveMessagePositionRef.current = '';
+            savePageScroll('messagesScrollTop', element.scrollTop);
+          }}>
             {conversationItems.map(item => item.type === 'message'
               ? <div key={`message-${item.value.id}`} className={'msg' + (item.value.from === me.id ? ' me' : '')}>
                 {item.value.replyTo && <div className="reply-chunk"><span>Replying to @{item.value.replyTo.from === me.id ? 'you' : active.other.username}</span><div>{item.value.replyTo.text || 'Shared media'}</div></div>}
                 {item.value.text}
-                {item.value.attachments?.map(attachment => attachment.type.startsWith('image/')
-                  ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
-                  : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}
+                {item.value.attachments?.map(attachment => <ChatMediaItem key={attachment.key} attachment={attachment} onRefresh={() => refreshMessageAttachment(active.id, attachment.key)} />)}
                 <div className="msg-actions"><button className="mini-action" onClick={() => setReplyingTo(item.value)}>Reply</button><i>{time(item.value.ts)}{item.value.from === me.id && <span className={'ticks ' + (item.value.status || 'sent')} title={item.value.status === 'read' ? 'Read' : item.value.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={item.value.status === 'read' ? 'Read' : item.value.status === 'delivered' ? 'Delivered' : 'Sent'}>{item.value.status === 'sent' || !item.value.status ? '✓' : '✓✓'}</span>}</i></div>
               </div>
               : <article key={`call-${item.value.id}`} className={`chat-call-log${item.value.status === 'missed' || item.value.status === 'declined' ? ' missed' : ''}`}>

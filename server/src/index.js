@@ -12,6 +12,7 @@ import webpush from 'web-push';
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 
 const {
   MONGO_URL = 'mongodb://mongo:27017/nepachat', PORT = 4000, NODE_ENV = 'development',
@@ -38,7 +39,7 @@ const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
 const mediaFiles = db.collection('media.files');
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), activityLikes = db.collection('activityLikes'), activityComments = db.collection('activityComments'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings'), rateLimits = db.collection('rateLimits');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), activityLikes = db.collection('activityLikes'), activityComments = db.collection('activityComments'), friendships = db.collection('friendships'), blockedUsers = db.collection('blockedUsers'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings'), rateLimits = db.collection('rateLimits');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -60,6 +61,7 @@ await db.collection('media.chunks').createIndex({ files_id: 1, n: 1 }, { unique:
 await friendships.createIndex({ pairKey: 1 }, { unique: true });
 await friendships.createIndex({ fromId: 1, status: 1 });
 await friendships.createIndex({ toId: 1, status: 1 });
+await blockedUsers.createIndex({ blockerId: 1, blockedId: 1 }, { unique: true });
 await deviceSessions.createIndex({ userId: 1, revokedAt: 1 });
 await devicePairings.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 await rateLimits.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
@@ -362,6 +364,11 @@ const admin = (req, res, next) => {
 async function notifyUser(userId, notification) {
   const subscriptions = await pushSubs.find({ userId }).toArray();
   await Promise.all(subscriptions.map(async item => {
+    if (!isAllowedPushEndpoint(item.subscription?.endpoint)) {
+      console.error('Removed push subscription with an unsupported endpoint host.');
+      await pushSubs.deleteOne({ _id: item._id });
+      return;
+    }
     try {
       await webpush.sendNotification(item.subscription, JSON.stringify(notification));
     } catch (error) {
@@ -371,25 +378,44 @@ async function notifyUser(userId, notification) {
   }));
 }
 
-const attachmentUrlFromKey = (req, key) => {
+const isAllowedPushEndpoint = endpoint => {
+  if (typeof endpoint !== 'string' || endpoint.length > 2048) return false;
+  let parsed;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || isIP(parsed.hostname)) return false;
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  return host === 'fcm.googleapis.com'
+    || host === 'push.services.mozilla.com'
+    || host.endsWith('.push.services.mozilla.com')
+    || host === 'notify.windows.com'
+    || host.endsWith('.notify.windows.com')
+    || host === 'push.apple.com'
+    || host.endsWith('.push.apple.com');
+};
+
+const attachmentUrlFromKey = (req, key, viewerId = req?.uid) => {
   const raw = String(key || '').replace(/^\/+/, '');
-  if (!raw || !req?.uid) return '';
+  if (!raw || !viewerId) return '';
   const host = req?.get('host');
   const protocol = req?.secure ? 'https' : 'http';
   const base = process.env.PUBLIC_MEDIA_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
   const expires = Math.floor(Date.now() / 1000) + 3600;
-  const signature = createHmac('sha256', JWT_SECRET).update(`${req.uid}:${expires}:${raw}`).digest('hex');
-  const query = new URLSearchParams({ key: raw, viewer: req.uid, expires: String(expires), signature });
+  const signature = createHmac('sha256', JWT_SECRET).update(`${viewerId}:${expires}:${raw}`).digest('hex');
+  const query = new URLSearchParams({ key: raw, viewer: viewerId, expires: String(expires), signature });
   return `${base.replace(/\/$/, '')}/api/media?${query}`;
 };
 
-async function messageView(message, req) {
+async function messageView(message, req, viewerId = req.uid) {
   const attachments = await Promise.all((message.attachments || []).map(async attachment => {
     const normalized = { ...attachment };
     if (r2Configured) {
       normalized.url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 });
     } else {
-      normalized.url = attachmentUrlFromKey(req, attachment.key);
+      normalized.url = attachmentUrlFromKey(req, attachment.key, viewerId);
     }
     return normalized;
   }));
@@ -695,6 +721,7 @@ app.delete('/api/admin/users/:id', auth, admin, wrap(async (req, res) => {
     activityLikes.deleteMany({ $or: [{ userId: userIdString }, { postId: { $in: postIds } }] }),
     activityComments.deleteMany({ $or: [{ authorId: userIdString }, { postId: { $in: postIds } }] }),
     friendships.deleteMany({ $or: [{ fromId: userIdString }, { toId: userIdString }] }),
+    blockedUsers.deleteMany({ $or: [{ blockerId: userIdString }, { blockedId: userIdString }] }),
     calls.deleteMany({ participants: userIdString }),
     locationShares.deleteMany({
       $or: [{ ownerId: userIdString }, { peerId: userIdString }, { participants: userIdString }],
@@ -896,7 +923,9 @@ app.get('/api/calls/history', auth, wrap(async (req, res) => {
 
 app.post('/api/push/subscribe', auth, wrap(async (req, res) => {
   const subscription = req.body.subscription;
-  if (!subscription?.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) return res.status(400).json({ error: 'Invalid push subscription' });
+  if (!isAllowedPushEndpoint(subscription?.endpoint) || typeof subscription.keys?.p256dh !== 'string' || typeof subscription.keys?.auth !== 'string') {
+    return res.status(400).json({ error: 'Invalid push subscription' });
+  }
   await pushSubs.updateOne({ endpoint: subscription.endpoint }, { $set: { endpoint: subscription.endpoint, subscription, userId: req.uid, deviceId: req.deviceId, updatedAt: Date.now() } }, { upsert: true });
   res.json({ ok: true });
 }));
@@ -956,7 +985,12 @@ async function friendStateFor(userId) {
     else if (link.toId === userId) incoming.push({ id: String(link._id), user: person, createdAt: link.createdAt });
     else outgoing.push({ id: String(link._id), user: person, createdAt: link.createdAt });
   }));
-  return { friends, incoming, outgoing };
+  const blocks = await blockedUsers.find({ blockerId: userId }).toArray();
+  const blocked = await Promise.all(blocks.map(async block => {
+    const user = await users.findOne({ _id: oid(block.blockedId) });
+    return user ? pub(user) : null;
+  }));
+  return { friends, incoming, outgoing, blocked: blocked.filter(Boolean) };
 }
 
 app.get('/api/friends', auth, wrap(async (req, res) => {
@@ -971,6 +1005,9 @@ app.post('/api/friends/requests', auth, wrap(async (req, res) => {
   const targetId = String(target._id);
   if (targetId === req.uid) return res.status(400).json({ error: 'You cannot send a friend request to yourself' });
   const pairKey = [req.uid, targetId].sort().join('~');
+  if (await blockedUsers.findOne({ $or: [{ blockerId: req.uid, blockedId: targetId }, { blockerId: targetId, blockedId: req.uid }] })) {
+    return res.status(403).json({ error: 'Friend requests are unavailable for this user' });
+  }
   const existing = await friendships.findOne({ pairKey });
   if (existing?.status === 'accepted') return res.status(409).json({ error: 'You are already friends' });
   if (existing?.status === 'pending') {
@@ -1007,6 +1044,10 @@ app.patch('/api/friends/requests/:id', auth, wrap(async (req, res) => {
   const request = await friendships.findOne({ _id: id, toId: req.uid, status: 'pending' });
   if (!request) return res.status(404).json({ error: 'Friend request not found' });
   if (action === 'accept') {
+    if (await blockedUsers.findOne({ $or: [{ blockerId: req.uid, blockedId: request.fromId }, { blockerId: request.fromId, blockedId: req.uid }] })) {
+      await friendships.deleteOne({ _id: id, toId: req.uid, status: 'pending' });
+      return res.status(403).json({ error: 'This friend request is no longer available' });
+    }
     await friendships.updateOne({ _id: id, toId: req.uid, status: 'pending' }, { $set: { status: 'accepted', acceptedAt: Date.now() } });
     const acceptingUser = await users.findOne({ _id: oid(req.uid) });
     const acceptedBy = acceptingUser ? pub(acceptingUser) : { id: req.uid, username: 'Someone', email: '' };
@@ -1037,6 +1078,30 @@ app.delete('/api/friends/:friendId', auth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.post('/api/friends/:friendId/block', auth, wrap(async (req, res) => {
+  const id = oid(req.params.friendId);
+  if (!id || String(id) === req.uid) return res.status(400).json({ error: 'Choose a valid user to block' });
+  const blockedId = String(id);
+  if (!await users.findOne({ _id: id }, { projection: { _id: 1 } })) return res.status(404).json({ error: 'User not found' });
+  await blockedUsers.updateOne(
+    { blockerId: req.uid, blockedId },
+    { $setOnInsert: { blockerId: req.uid, blockedId, createdAt: Date.now() } },
+    { upsert: true },
+  );
+  await friendships.deleteOne({ pairKey: [req.uid, blockedId].sort().join('~') });
+  io.to(['u:' + req.uid, 'u:' + blockedId]).emit('friend:changed');
+  res.json({ ok: true });
+}));
+
+app.delete('/api/friends/:friendId/block', auth, wrap(async (req, res) => {
+  const id = oid(req.params.friendId);
+  if (!id || String(id) === req.uid) return res.status(400).json({ error: 'Choose a valid user to unblock' });
+  const result = await blockedUsers.deleteOne({ blockerId: req.uid, blockedId: String(id) });
+  if (!result.deletedCount) return res.status(404).json({ error: 'Blocked user not found' });
+  io.to(['u:' + req.uid, 'u:' + String(id)]).emit('friend:changed');
+  res.json({ ok: true });
+}));
+
 app.get('/api/chats', auth, wrap(async (req, res) => {
   const list = await chats.find({ members: req.uid }).sort({ ts: -1 }).toArray();
   const peerIds = list
@@ -1062,6 +1127,9 @@ app.post('/api/chats', auth, wrap(async (req, res) => {
   if (!target) return res.status(404).json({ error: 'No NepaChat user found', invite: emailRx.test(q) });
   const tid = String(target._id);
   if (tid === req.uid) return res.status(400).json({ error: 'You cannot start a chat with yourself' });
+  if (await blockedUsers.findOne({ $or: [{ blockerId: req.uid, blockedId: tid }, { blockerId: tid, blockedId: req.uid }] })) {
+    return res.status(403).json({ error: 'Chatting is unavailable for this user' });
+  }
   const key = [req.uid, tid].sort().join('~');
   if (!await friendships.findOne({ pairKey: key, status: 'accepted' })) {
     return res.status(403).json({ error: 'You can only chat with accepted friends. Send a friend request and wait for it to be accepted.' });
@@ -1242,14 +1310,14 @@ app.put('/api/me/avatar', auth, express.raw({ type: '*/*', limit: avatarLimit })
   res.json(accountView({ ...user, avatarKey }));
 }));
 
-async function activityPostView(post, req, metrics = new Map()) {
+async function activityPostView(post, req, metrics = new Map(), viewerId = req.uid) {
   const postMetrics = metrics.get(String(post._id)) || {};
   const author = await users.findOne({ _id: oid(post.authorId) });
   const attachments = await Promise.all((post.attachments || []).map(async attachment => ({
     ...attachment,
     url: r2Configured
       ? await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 })
-      : attachmentUrlFromKey(req, attachment.key),
+      : attachmentUrlFromKey(req, attachment.key, viewerId),
   })));
   return {
     id: String(post._id),
@@ -1341,7 +1409,12 @@ app.post('/api/activity/posts', auth, wrap(async (req, res) => {
   const result = await activityPosts.insertOne(post);
   const view = await activityPostView({ ...post, _id: result.insertedId }, req);
   const recipients = await activityRecipients(req.uid);
-  io.to(recipients.map(userId => 'u:' + userId)).emit('activity:post', view);
+  await Promise.all(recipients.map(async userId => {
+    const recipientView = userId === req.uid
+      ? view
+      : await activityPostView({ ...post, _id: result.insertedId }, req, new Map(), userId);
+    io.to('u:' + userId).emit('activity:post', recipientView);
+  }));
   await Promise.all(recipients.filter(userId => userId !== req.uid).map(userId => notifyUser(userId, {
     title: `New activity from ${view.author.username}`,
     body: text || (attachments.length ? 'Shared a photo or video' : 'Shared a post'),
@@ -1530,10 +1603,14 @@ app.post('/api/chats/:id/messages', auth, wrap(async (req, res) => {
   const r = await msgs.insertOne(m);
   const preview = text || 'Shared media';
   await chats.updateOne({ _id: chat._id }, { $set: { last: preview.slice(0, 80), ts: m.ts, by: req.uid } });
-  const message = { ...await messageView({ ...m, _id: r.insertedId }, req), status: 'sent' };
+  const messageDocument = { ...m, _id: r.insertedId };
+  const message = { ...await messageView(messageDocument, req), status: 'sent' };
   for (const uid of chat.members) {
     const chatViewForUser = await chatView({ ...chat, last: preview.slice(0, 80), ts: m.ts, by: req.uid }, uid);
-    io.to('u:' + uid).emit('message', { chatId: req.params.id, message, chat: chatViewForUser });
+    const recipientMessage = uid === req.uid
+      ? message
+      : { ...await messageView(messageDocument, req, uid), status: 'sent' };
+    io.to('u:' + uid).emit('message', { chatId: req.params.id, message: recipientMessage, chat: chatViewForUser });
     if (uid !== req.uid) {
       await notifyUser(uid, {
         title: 'New message',
