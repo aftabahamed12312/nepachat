@@ -377,9 +377,80 @@ html,body,#root{min-width:0;min-height:100%}
 .call-shell-overlay{overflow-y:auto;overscroll-behavior:contain}
 .call-shell-overlay .call-panel{margin:auto}
 
+@media(min-width:761px){
+  .app{grid-template-columns:minmax(320px,42%) minmax(0,1fr);max-width:none}
+}
+.app>.top{background:#202c33;color:#e9edef}
+.app>.top b span{color:#25d366}
+.app>.side{background:#111b21;border-color:#26343d;color:#e9edef}
+.app>.side .side-nav button{color:#aebac1}
+.app>.side .side-nav button:hover,.app>.side .side-nav button.selected{background:#202c33;color:#25d366}
+.app>.side .search{border-color:#2a3942;background:#202c33;color:#e9edef}
+.app>.side .search::placeholder{color:#8696a0}
+.app>.side .row{color:#e9edef}
+.app>.side .row:hover,.app>.side .row.on{background:#202c33}
+.app>.side .row small,.app>.side .row em,.app>.side .presence-state{color:#8696a0}
+.app>.side .presence-state.online{color:#25d366}
+.app>.side .avatar .presence-dot{border-color:#111b21}
+.app>.main{background:#0b141a}
+.app>.main .chead{background:#202c33;border-color:#26343d;color:#e9edef}
+.app>.main .mail{background:#202c33;color:#aebac1}
+.app>.main .mail:hover{background:#2a3942;color:#25d366}
+.app>.main .presence-label{color:#aebac1}
+.app>.main .msgs{background-color:#0b141a;background-image:radial-gradient(rgba(255,255,255,.035) .7px,transparent .7px);background-size:18px 18px}
+.app>.main .msg{background:#202c33;color:#e9edef;box-shadow:0 1px 1px rgba(0,0,0,.18)}
+.app>.main .msg.me{background:#005c4b}
+.app>.main .msg i,.app>.main .reply-chunk{color:#aebac1}
+.app>.main .reply-chunk{background:rgba(0,0,0,.18);border-color:#25d366}
+.app>.main .reply-chunk span,.app>.main .reply-chunk div,.app>.main .mini-action{color:#b9e8d7}
+.app>.main .comp{background:#202c33;border-color:#26343d}
+.app>.main .comp textarea{border-color:#2a3942;background:#2a3942;color:#e9edef}
+.app>.main .comp textarea::placeholder{color:#8696a0}
+.app>.main .attach{border:0;background:#202c33;color:#aebac1}
+.app>.main .send{background:#00a884}
+.app>.main .file-queue{background:#202c33}
+.app>.main .location-share{background:#103b32;border-color:#26343d;color:#e9edef}
+.app>.main .location-share small{color:#aebac1}
+.app>.main .inline-error{background:#202c33}
+.chat-call-log{display:flex;align-items:center;gap:12px;align-self:center;width:min(100%,370px);padding:12px 14px;border:1px solid #2a3942;border-radius:14px;background:#202c33;color:#e9edef;box-shadow:0 1px 2px rgba(0,0,0,.16)}
+.chat-call-icon{display:grid;place-items:center;width:40px;height:40px;flex:none;border-radius:50%;background:#075e54;color:#d9fdd3;font-size:19px}
+.chat-call-log.missed .chat-call-icon{background:#4a2630;color:#ff8293}
+.chat-call-details{flex:1;min-width:0}
+.chat-call-details b,.chat-call-details small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-call-details small,.chat-call-log time{color:#aebac1;font-size:12px}
+.chat-call-log button{width:34px;height:34px;border:0;border-radius:50%;background:#075e54;color:#d9fdd3;font-size:20px}
+.chat-call-log button:disabled{opacity:.45;cursor:not-allowed}
+.history-row{flex-wrap:wrap}
+.app>.top .hbtn{display:grid;place-items:center;flex:none;font-size:16px;transition:background .16s,color .16s}
+.app>.top .hbtn:hover{background:#2a3942;color:#25d366}
+.app>.top .hbtn .anticon,.side-nav .anticon,.mail .anticon,.attach .anticon,.send .anticon,.chat-call-icon .anticon,.chat-call-log button .anticon{display:block}
+.app>.side .side-nav button{display:flex;align-items:center;justify-content:center;gap:8px}
+.app>.side .search-wrap{display:flex;align-items:center;gap:10px;margin:10px;padding:0 14px;border:1px solid #2a3942;border-radius:24px;background:#202c33;color:#aebac1}
+.app>.side .search-wrap:focus-within{border-color:#00a884}
+.app>.side .search{flex:1;min-width:0;width:100%;margin:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:#e9edef}
+.app>.side .search:focus{outline:none}
+.app>.side .search-wrap>.anticon{flex:none;font-size:15px}
+.app>.side .row{min-height:76px}
+.app>.side .row+.row{border-top:1px solid rgba(134,150,160,.12)}
+.app>.main .chead{min-height:68px}
+.app>.main .chead .mail{font-size:18px}
+.app>.main .chead .mail:focus-visible,.app>.top .hbtn:focus-visible,.app>.side .side-nav button:focus-visible,.chat-call-log button:focus-visible,.attach:focus-visible,.send:focus-visible{outline:2px solid #25d366;outline-offset:2px}
+.chat-call-icon{font-size:17px}
+.chat-call-log button{display:grid;place-items:center}
+.chat-call-log button .anticon{font-size:15px}
+.app>.main .back{color:#aebac1}
+.app>.main .back .anticon{font-size:18px}
+.app>.main .attach,.app>.main .send{display:grid;place-items:center}
+.app>.main .attach .anticon{font-size:19px}
+.app>.main .send .anticon{font-size:17px}
+
 @media (min-width:761px) and (max-width:1000px){
   .app{grid-template-columns:minmax(260px,32vw) minmax(0,1fr)}
   .chead{gap:8px;padding-inline:10px}
+}
+
+@media(min-width:761px) and (max-width:1000px){
+  .app{grid-template-columns:minmax(300px,42%) minmax(0,1fr)}
 }
 
 @media (max-width:760px){
@@ -398,8 +469,11 @@ html,body,#root{min-width:0;min-height:100%}
   .card{margin:clamp(16px,5vh,32px) auto;padding:20px}
   .auth-main{padding:1px 12px 32px}
   .top{gap:6px}
+  .app>.top .hbtn{width:30px;height:30px}
+  .app>.top{gap:4px}
   .chead{min-width:0}
   .chead .grow{flex:1 1 0}
+  .app>.main .chead .mail{width:32px;height:32px;font-size:16px}
   .mail{flex:none}
   .location-share{padding:9px 10px;overflow-wrap:anywhere}
   .location-share a{white-space:normal}

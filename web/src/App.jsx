@@ -21,18 +21,30 @@ import {
   CloseOutlined,
   CommentOutlined,
   DeleteOutlined,
+  EnvironmentOutlined,
+  HistoryOutlined,
   HeartFilled,
   HeartOutlined,
+  LogoutOutlined,
   LoadingOutlined,
+  MailOutlined,
+  MessageOutlined,
+  MobileOutlined,
+  PaperClipOutlined,
+  PhoneOutlined,
   PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RetweetOutlined,
+  SearchOutlined,
+  SettingOutlined,
   ShareAltOutlined,
   SendOutlined,
   TeamOutlined,
   UserAddOutlined,
   UsergroupAddOutlined,
   VideoCameraOutlined,
+  ArrowLeftOutlined,
 } from '@ant-design/icons';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -914,7 +926,7 @@ function ProfileSettings({ me, token, onClose, onUpdated }) {
   );
 }
 
-function CallHistory({ token, userId, onClose }) {
+function CallHistory({ token, userId, chats, onOpenChat, onClose }) {
   const [history, setHistory] = useState([]), [error, setError] = useState('');
   useEffect(() => {
     let current = true;
@@ -941,6 +953,7 @@ function CallHistory({ token, userId, onClose }) {
             <Avatar name={item.other.username} avatarPath={item.other.avatarPath} />
             <div className="grow"><b>{item.other.username}</b><small>{item.direction === 'incoming' ? 'Incoming' : 'Outgoing'} {item.kind} · {label(item)}</small></div>
             <time>{new Date(item.startedAt).toLocaleString()}</time>
+            {chats.find(chat => chat.id === item.chatId) && <button className="mini-action" onClick={() => { onOpenChat(item.chatId); onClose(); }}>Open chat</button>}
           </div>
         ))}</div>
         <button className="btn ghost" onClick={onClose}>Close</button>
@@ -977,7 +990,7 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [publicConfig, setPublicConfig] = useState({ allowPublicSignUp: true, emailVerificationEnabled: false, vapidPublicKey: null, pushNotificationsEnabled: false, mediaEnabled: false });
   const [adminModal, setAdminModal] = useState(false), [adminUsersOpen, setAdminUsersOpen] = useState(false), [callsOpen, setCallsOpen] = useState(false), [locationModal, setLocationModal] = useState(false), [profileOpen, setProfileOpen] = useState(false), [linkedDevicesOpen, setLinkedDevicesOpen] = useState(false);
-  const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]);
+  const [chats, setChats] = useState([]), [active, setActive] = useState(null), [messages, setMessages] = useState([]), [chatCalls, setChatCalls] = useState([]);
   const [activeView, setActiveView] = useState('chats'), [activityPosts, setActivityPosts] = useState([]);
   const [activityText, setActivityText] = useState(''), [activityFiles, setActivityFiles] = useState([]);
   const [activityError, setActivityError] = useState(''), [activityLoading, setActivityLoading] = useState(false), [postingActivity, setPostingActivity] = useState(false);
@@ -1184,6 +1197,7 @@ export default function App() {
     setCacheLoadedFor('');
     setChats([]);
     setMessages([]);
+    setChatCalls([]);
     setActive(null);
     setFriendData({ friends: [], incoming: [], outgoing: [] });
     setActivityPosts([]);
@@ -1198,6 +1212,9 @@ export default function App() {
     return updated;
   });
   const refreshFriendData = () => call('/friends', token).then(setFriendData);
+  const refreshChatCalls = chatId => call('/calls/history', token).then(items => {
+    if (activeRef.current?.id === chatId) setChatCalls(items.filter(item => item.chatId === chatId));
+  }).catch(error => console.error(`Unable to refresh call history for chat ${chatId}:`, error));
   const updatePresence = presence => {
     const mergeUserPresence = user => user?.id === presence.userId
       ? { ...user, online: presence.online, lastSeenAt: presence.lastSeenAt }
@@ -1930,6 +1947,9 @@ export default function App() {
     });
     s.on('account:deleted', logout);
     s.on('location:stopped', ({ shareId }) => setLocationShares(current => current.filter(item => item.id !== shareId)));
+    s.on('call:history:changed', ({ chatId } = {}) => {
+      if (typeof chatId === 'string' && activeRef.current?.id === chatId) refreshChatCalls(chatId);
+    });
     s.on('call:incoming', incoming => {
       if (callRef.current) { s.emit('call:end', { chatId: incoming.chatId, callId: incoming.callId, reason: 'declined' }); return; }
       pendingCandidatesRef.current = pendingCandidatesRef.current.filter(item => item.callId === incoming.callId);
@@ -2041,6 +2061,7 @@ export default function App() {
     let current = true;
     messageChatIdRef.current = active.id;
     setMessages([]);
+    setChatCalls([]);
     const loadMessages = async () => {
       try {
         const cached = await loadCachedMessages(me.id, active.id);
@@ -2063,12 +2084,21 @@ export default function App() {
       }
     };
     loadMessages();
+    call('/calls/history', token).then(items => {
+      if (current && messageChatIdRef.current === active.id) setChatCalls(items.filter(item => item.chatId === active.id));
+    }).catch(error => console.error(`Unable to load call history for chat ${active.id}:`, error));
     call(`/chats/${active.id}/location-shares`, token).then(shares => setLocationShares(current => [...current.filter(item => item.chatId !== active.id), ...shares])).catch(() => {});
     return () => { current = false; };
   }, [active?.id, token, me?.id]);
-  useEffect(() => { endRef.current?.scrollIntoView(); }, [messages]);
+  useEffect(() => { endRef.current?.scrollIntoView(); }, [messages, chatCalls]);
 
   const open = c => { setChats(l => l.some(x => x.id === c.id) ? l : [c, ...l]); setActiveView('chats'); setActive(c); };
+  const openChatFromHistory = chatId => {
+    const chat = chats.find(item => item.id === chatId);
+    if (!chat) return;
+    setActiveView('chats');
+    setActive(chat);
+  };
   const openFriendChat = async friend => {
     setFriendError('');
     try {
@@ -2339,6 +2369,10 @@ export default function App() {
   const acceptedFriendIds = new Set(friendData.friends.map(friend => friend.id));
   const shown = chats.filter(c => acceptedFriendIds.has(c.other.id) && (c.other.username + c.other.email).includes(filter.toLowerCase()));
   const visibleLocationShares = active ? locationShares.filter(share => share.chatId === active.id) : [];
+  const conversationItems = [
+    ...messages.map(message => ({ type: 'message', value: message, timestamp: message.ts })),
+    ...chatCalls.map(item => ({ type: 'call', value: item, timestamp: new Date(item.startedAt).getTime() })),
+  ].sort((left, right) => left.timestamp - right.timestamp);
   return (
     <div className={'app' + (active || activeView === 'activity' ? ' open' : '')}>
       <header className="top">
@@ -2346,23 +2380,23 @@ export default function App() {
         <div className="grow" />
         <small>@{me.username}</small>
         {!isOnline && <small className="offline-indicator" role="status" title="Showing data saved on this device">Offline · saved data</small>}
-        <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}>⚙</button>
-        {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}>♙</button>}
-        {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}>＋</button>}
-        <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}>◷</button>
-        <button className="hbtn" title="Linked devices" aria-label="Linked devices" onClick={() => setLinkedDevicesOpen(true)}>▣</button>
-        <button className="hbtn" title="New chat" onClick={() => setModal(true)}>＋</button>
-        <button className="hbtn" title="Sign out" onClick={logout}>⎋</button>
+        <button className="hbtn" title="Profile settings" aria-label="Profile settings" onClick={() => setProfileOpen(true)}><SettingOutlined /></button>
+        {me.role === 'admin' && <button className="hbtn" title="View users" aria-label="View users" onClick={() => setAdminUsersOpen(true)}><TeamOutlined /></button>}
+        {me.role === 'admin' && <button className="hbtn" title="Create account" aria-label="Create account" onClick={() => setAdminModal(true)}><UserAddOutlined /></button>}
+        <button className="hbtn" title="Call history" aria-label="Call history" onClick={showCallHistory}><HistoryOutlined /></button>
+        <button className="hbtn" title="Linked devices" aria-label="Linked devices" onClick={() => setLinkedDevicesOpen(true)}><MobileOutlined /></button>
+        <button className="hbtn" title="New chat" aria-label="New chat" onClick={() => setModal(true)}><PlusOutlined /></button>
+        <button className="hbtn" title="Sign out" aria-label="Sign out" onClick={logout}><LogoutOutlined /></button>
       </header>
       <aside className="side">
         <nav className="side-nav" aria-label="Main navigation">
-          <button className={activeView === 'chats' ? 'selected' : ''} onClick={() => selectView('chats')}>Chats</button>
-          <button className={activeView === 'activity' ? 'selected' : ''} onClick={() => selectView('activity')}>Activity</button>
+          <button className={activeView === 'chats' ? 'selected' : ''} onClick={() => selectView('chats')}><MessageOutlined /> Chats</button>
+          <button className={activeView === 'activity' ? 'selected' : ''} onClick={() => selectView('activity')}><TeamOutlined /> Activity</button>
         </nav>
         {activeView === 'chats' && <>
-          <input className="search" placeholder="Search chats" value={filter} onChange={e => setFilter(e.target.value)} />
+          <label className="search-wrap"><SearchOutlined aria-hidden="true" /><input className="search" aria-label="Search chats" placeholder="Search or start a new chat" value={filter} onChange={e => setFilter(e.target.value)} /></label>
           <div className="list">
-            {!shown.length && <p className="muted pad">No chats yet. Tap ＋ to start one.</p>}
+            {!shown.length && <p className="muted pad">No chats yet. Tap <PlusOutlined /> to start one.</p>}
             {shown.map(c => (
               <button key={c.id} className={'row' + (active?.id === c.id ? ' on' : '')} onClick={() => { setActiveView('chats'); setActive(c); }}>
                 <Avatar name={c.other.username} avatarPath={c.other.avatarPath} online={c.other.online} />
@@ -2485,13 +2519,13 @@ export default function App() {
           <button className="activity-fab" aria-label="Create an activity post" title="Create an activity post" onClick={() => { setActivityError(''); setActivityComposerOpen(true); }}><PlusOutlined /></button>
         </div> : !active ? <div className="empty"><div>💬</div><h2>Welcome, @{me.username}</h2><p>Select a chat or start a new one with an email address or username.</p></div> : <>
           <div className="chead">
-            <button className="back" onClick={() => setActive(null)}>←</button>
+            <button className="back" aria-label="Back to chats" onClick={() => setActive(null)}><ArrowLeftOutlined /></button>
             <Avatar name={active.other.username} avatarPath={active.other.avatarPath} online={active.other.online} big />
             <div className="grow"><b>{active.other.username}</b><small className="presence-label">{presenceLabel(active.other)}</small></div>
-            <button className="mail" title="Share live location" aria-label="Share live location" onClick={() => setLocationModal(true)}>⌖</button>
-            <button className="mail" title="Start audio call" aria-label="Start audio call" onClick={() => startCall('audio')}>☎</button>
-            <button className="mail" title="Start video call" aria-label="Start video call" onClick={() => startCall('video')}>▣</button>
-            <a className="mail" href={`mailto:${active.other.email}`} title="Send email">✉</a>
+            <button className="mail" title="Share live location" aria-label="Share live location" onClick={() => setLocationModal(true)}><EnvironmentOutlined /></button>
+            <button className="mail" title="Start audio call" aria-label="Start audio call" onClick={() => startCall('audio')}><PhoneOutlined /></button>
+            <button className="mail" title="Start video call" aria-label="Start video call" onClick={() => startCall('video')}><VideoCameraOutlined /></button>
+            <a className="mail" href={`mailto:${active.other.email}`} title="Send email" aria-label="Send email"><MailOutlined /></a>
           </div>
           {visibleLocationShares.map(share => <div className="location-share" key={share.id}>
             <div className="grow"><b>{share.ownerId === me.id ? 'You are sharing live location' : `@${share.ownerName} is sharing live location`}</b><small>Until {new Date(share.expiresAt).toLocaleTimeString()}</small></div>
@@ -2500,14 +2534,24 @@ export default function App() {
           </div>)}
           {locationError && <div className="inline-error">{locationError}</div>}
           <div className="msgs">
-            {messages.map(m => <div key={m.id} className={'msg' + (m.from === me.id ? ' me' : '')}>
-              {m.replyTo && <div className="reply-chunk"><span>Replying to @{m.replyTo.from === me.id ? 'you' : active.other.username}</span><div>{m.replyTo.text || 'Shared media'}</div></div>}
-              {m.text}
-              {m.attachments?.map(attachment => attachment.type.startsWith('image/')
-                ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
-                : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}
-              <div className="msg-actions"><button className="mini-action" onClick={() => setReplyingTo(m)}>Reply</button><i>{time(m.ts)}{m.from === me.id && <span className={'ticks ' + (m.status || 'sent')} title={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={m.status === 'read' ? 'Read' : m.status === 'delivered' ? 'Delivered' : 'Sent'}>{m.status === 'sent' || !m.status ? '✓' : '✓✓'}</span>}</i></div>
-            </div>)}
+            {conversationItems.map(item => item.type === 'message'
+              ? <div key={`message-${item.value.id}`} className={'msg' + (item.value.from === me.id ? ' me' : '')}>
+                {item.value.replyTo && <div className="reply-chunk"><span>Replying to @{item.value.replyTo.from === me.id ? 'you' : active.other.username}</span><div>{item.value.replyTo.text || 'Shared media'}</div></div>}
+                {item.value.text}
+                {item.value.attachments?.map(attachment => attachment.type.startsWith('image/')
+                  ? <a className="attachment-link" href={attachment.url} target="_blank" rel="noreferrer" key={attachment.key}><img className="message-image" src={attachment.url} alt={attachment.name} loading="lazy" /></a>
+                  : <video className="message-video" key={attachment.key} src={attachment.url} controls playsInline preload="metadata" />)}
+                <div className="msg-actions"><button className="mini-action" onClick={() => setReplyingTo(item.value)}>Reply</button><i>{time(item.value.ts)}{item.value.from === me.id && <span className={'ticks ' + (item.value.status || 'sent')} title={item.value.status === 'read' ? 'Read' : item.value.status === 'delivered' ? 'Delivered' : 'Sent'} aria-label={item.value.status === 'read' ? 'Read' : item.value.status === 'delivered' ? 'Delivered' : 'Sent'}>{item.value.status === 'sent' || !item.value.status ? '✓' : '✓✓'}</span>}</i></div>
+              </div>
+              : <article key={`call-${item.value.id}`} className={`chat-call-log${item.value.status === 'missed' || item.value.status === 'declined' ? ' missed' : ''}`}>
+                <span className="chat-call-icon" aria-hidden="true">{item.value.kind === 'video' ? <VideoCameraOutlined /> : <PhoneOutlined />}</span>
+                <div className="chat-call-details">
+                  <b>{item.value.direction === 'incoming' ? 'Incoming' : 'Outgoing'} {item.value.kind} call</b>
+                  <small>{item.value.status === 'missed' ? 'Missed' : item.value.status === 'declined' ? 'Declined' : item.value.status === 'cancelled' ? 'Cancelled' : item.value.status === 'ended' ? 'Call ended' : item.value.status === 'active' ? 'Connected' : 'Calling'}</small>
+                </div>
+                <time>{new Date(item.value.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
+                <button type="button" aria-label={`Call ${active.other.username} again`} title="Call again" disabled={!isOnline || Boolean(callState)} onClick={() => startCall(item.value.kind)}><RetweetOutlined /></button>
+              </article>)}
             <div ref={endRef} />
           </div>
           {attachedFiles.length > 0 && <div className="file-queue">{attachedFiles.map((file, index) => {
@@ -2520,16 +2564,16 @@ export default function App() {
               <button disabled={isSending} aria-label={`Remove ${file.name}`} onClick={() => {
                 setAttachedFiles(current => current.filter((_, i) => i !== index));
                 setUploadState(current => { const next = { ...current }; delete next[key]; return next; });
-              }}>×</button>
+              }}><CloseOutlined /></button>
             </span>;
           })}</div>}
           {replyingTo && <div className="reply-box"><div className="reply-meta">Replying to @{messages.find(item => item.id === replyingTo.id)?.from === me.id ? 'you' : active.other.username}</div><div className="reply-preview">{replyingTo.text || 'Shared media'}</div><button className="text-button" onClick={() => setReplyingTo(null)}>Cancel</button></div>}
           {composeError && <div className="inline-error">{composeError}</div>}
           <div className="comp">
             <input ref={fileInputRef} className="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" multiple disabled={isSending || attachedFiles.length >= 5} onChange={event => { handleFilesSelected(event.target.files); event.target.value = ''; }} />
-            <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || isSending || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}>▧</button>
+            <button className="attach" title={publicConfig.mediaEnabled ? 'Attach image or video' : 'Media storage is not configured'} aria-label="Attach image or video" disabled={!publicConfig.mediaEnabled || isSending || attachedFiles.length >= 5} onClick={() => fileInputRef.current?.click()}><PaperClipOutlined /></button>
             <textarea rows={1} value={text} disabled={isSending} placeholder={replyingTo ? 'Reply to the message…' : 'Type a message'} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
-            <button className="send" disabled={isSending || (!text.trim() && !attachedFiles.length)} onClick={send}>{isSending ? '…' : '➤'}</button>
+            <button className="send" aria-label="Send message" disabled={isSending || (!text.trim() && !attachedFiles.length)} onClick={send}>{isSending ? <LoadingOutlined spin /> : <SendOutlined />}</button>
           </div>
         </>}
       </main>
@@ -2546,7 +2590,7 @@ export default function App() {
       {linkedDevicesOpen && <LinkedDevices token={token} onClose={() => setLinkedDevicesOpen(false)} />}
       {adminUsersOpen && <AdminUsers token={token} currentUserId={me.id} onClose={() => setAdminUsersOpen(false)} />}
       {adminModal && <AdminCreateUser token={token} onClose={() => setAdminModal(false)} />}
-      {callsOpen && <CallHistory token={token} userId={me.id} onClose={() => setCallsOpen(false)} />}
+      {callsOpen && <CallHistory token={token} userId={me.id} chats={chats} onOpenChat={openChatFromHistory} onClose={() => setCallsOpen(false)} />}
       {locationModal && <LocationShareDialog onStart={startLocationShare} onClose={() => setLocationModal(false)} />}
       {profileOpen && <ProfileSettings me={me} token={token} onClose={() => setProfileOpen(false)} onUpdated={onProfileUpdated} />}
       {activityComposerOpen && <div className="modal activity-compose-modal" onClick={() => { if (!postingActivity) setActivityComposerOpen(false); }}>

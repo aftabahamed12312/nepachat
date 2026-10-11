@@ -1671,6 +1671,7 @@ io.on('connection', s => {
     await calls.updateOne({ callId }, { $setOnInsert: {
       callId, chatId, participants: chat.members, from: s.uid, to: peerId, kind, status: 'ringing', startedAt,
     } }, { upsert: true });
+    io.to(chat.members.map(userId => 'u:' + userId)).emit('call:history:changed', { chatId });
     io.to('u:' + peerId).emit('call:incoming', { chatId, callId, kind, offer, from: pub(from) });
     await notifyUser(peerId, {
       title: `Incoming ${kind} call`, body: `@${from.username} is calling you`,
@@ -1680,6 +1681,7 @@ io.on('connection', s => {
       try {
         const result = await calls.updateOne({ callId, status: 'ringing' }, { $set: { status: 'missed', endedAt: Date.now() } });
         if (!result.modifiedCount) return;
+        io.to(chat.members.map(userId => 'u:' + userId)).emit('call:history:changed', { chatId });
         io.to('u:' + s.uid).emit('call:ended', { chatId, callId, reason: 'missed' });
         await notifyUser(peerId, { title: 'Missed call', body: `You missed a ${kind} call from @${from.username}`, tag: `missed-${callId}`, url: '/?callHistory=1' });
       } catch (error) { console.error(error); }
@@ -1697,6 +1699,7 @@ io.on('connection', s => {
         { $set: { status: 'active', connectedAt: Date.now(), answeredByDevice: s.deviceId } },
       );
       if (!accepted.modifiedCount) return;
+      io.to(chat.members.map(userId => 'u:' + userId)).emit('call:history:changed', { chatId });
       io.to('u:' + s.uid).emit('call:answered-elsewhere', { chatId, callId, acceptedDeviceId: s.deviceId });
     }
     if (peerId) io.to('u:' + peerId).emit('call:signal', { chatId, callId, signal });
@@ -1711,6 +1714,7 @@ io.on('connection', s => {
         ? reason === 'declined' ? 'declined' : s.uid === record.from ? 'cancelled' : 'missed'
         : 'ended';
       await calls.updateOne({ _id: record._id }, { $set: { status, endedAt: Date.now() } });
+      io.to(chat.members.map(userId => 'u:' + userId)).emit('call:history:changed', { chatId });
     }
     if (s.uid !== record?.from) io.to('u:' + s.uid).emit('call:answered-elsewhere', { chatId, callId });
     if (peerId) io.to('u:' + peerId).emit('call:ended', { chatId, callId, reason: reason === 'declined' ? 'declined' : 'ended' });
