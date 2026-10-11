@@ -32,11 +32,13 @@ if (NODE_ENV === 'production' && (
   throw new Error('JWT_SECRET must be set to a cryptographically random value of at least 32 bytes in production.');
 }
 const JWT_SECRET = configuredJwtSecret || randomBytes(32).toString('base64url');
+const hashPassword = password => bcrypt.hash(password, 12);
+const validNewPassword = password => password.length >= 8 && Buffer.byteLength(password, 'utf8') <= 72;
 const client = new MongoClient(MONGO_URL);
 await client.connect();
 const db = client.db();
 const mediaFiles = db.collection('media.files');
-const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), activityLikes = db.collection('activityLikes'), activityComments = db.collection('activityComments'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings');
+const users = db.collection('users'), chats = db.collection('chats'), msgs = db.collection('messages'), pendingUsers = db.collection('pendingUsers'), calls = db.collection('calls'), locationShares = db.collection('locationShares'), pushSubs = db.collection('pushSubscriptions'), activityPosts = db.collection('activityPosts'), activityLikes = db.collection('activityLikes'), activityComments = db.collection('activityComments'), friendships = db.collection('friendships'), systemSettings = db.collection('systemSettings'), deviceSessions = db.collection('deviceSessions'), devicePairings = db.collection('devicePairings'), rateLimits = db.collection('rateLimits');
 await users.createIndex({ email: 1 }, { unique: true });
 await users.createIndex({ username: 1 }, { unique: true });
 await chats.createIndex({ members: 1 });
@@ -60,11 +62,50 @@ await friendships.createIndex({ fromId: 1, status: 1 });
 await friendships.createIndex({ toId: 1, status: 1 });
 await deviceSessions.createIndex({ userId: 1, revokedAt: 1 });
 await devicePairings.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+await rateLimits.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors({ origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') }));
 app.use(express.json({ limit: '50kb' }));
+const consumeRateLimit = async (key, limit, windowMs) => {
+  const now = new Date();
+  const previousWindow = new Date(now.getTime() - windowMs);
+  const activeWindow = { $gt: [{ $ifNull: ['$windowStart', new Date(0)] }, previousWindow] };
+  const update = [{
+    $set: {
+      windowStart: { $cond: [activeWindow, '$windowStart', now] },
+      count: { $cond: [activeWindow, { $add: [{ $ifNull: ['$count', 0] }, 1] }, 1] },
+      expiresAt: { $cond: [activeWindow, '$expiresAt', new Date(now.getTime() + windowMs)] },
+    },
+  }];
+  try {
+    await rateLimits.updateOne({ _id: key }, update, { upsert: true });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    await rateLimits.updateOne({ _id: key }, update);
+  }
+  const bucket = await rateLimits.findOne({ _id: key }, { projection: { count: 1, windowStart: 1 } });
+  return {
+    allowed: bucket.count <= limit,
+    retryAfter: Math.max(1, Math.ceil((bucket.windowStart.getTime() + windowMs - now.getTime()) / 1000)),
+  };
+};
+const rateLimit = (name, limit, windowMs) => (req, res, next) => {
+  const address = req.ip || req.socket.remoteAddress || 'unknown';
+  const key = createHmac('sha256', JWT_SECRET).update(`${name}:${address}`).digest('hex');
+  consumeRateLimit(key, limit, windowMs).then(result => {
+    if (!result.allowed) {
+      res.set('Retry-After', String(result.retryAfter));
+      return res.status(429).json({ error: 'Too many requests. Try again later.' });
+    }
+    next();
+  }).catch(error => {
+    console.error(`Unable to apply ${name} rate limit:`, error);
+    res.status(503).json({ error: 'Request protection is temporarily unavailable' });
+  });
+};
+app.use('/api', rateLimit('api', 300, 60_000));
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(',') } });
 const liveUserSockets = new Map();
@@ -79,7 +120,6 @@ const r2 = r2Configured ? new S3Client({
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
 }) : null;
-app.use('/uploads', express.static(localUploadsDir, { index: false }));
 let vapidPublicKey = ENV_VAPID_PUBLIC_KEY;
 let vapidPrivateKey = ENV_VAPID_PRIVATE_KEY;
 if (!vapidPublicKey || !vapidPrivateKey) {
@@ -219,12 +259,12 @@ async function seedAccount() {
   const email = String(process.env.SEED_EMAIL || '').trim().toLowerCase();
   const password = String(process.env.SEED_PASSWORD || '');
   if (!username && !email && !password) return;
-  if (!/^[a-z0-9_]{3,20}$/.test(username) || !emailRx.test(email) || password.length < 6) {
-    throw new Error('Set valid SEED_USERNAME, SEED_EMAIL, and SEED_PASSWORD values to create the seed account');
+  if (!/^[a-z0-9_]{3,20}$/.test(username) || !emailRx.test(email) || !validNewPassword(password)) {
+    throw new Error('Set valid SEED_USERNAME, SEED_EMAIL, and a password of 8-72 UTF-8 bytes to create the seed account');
   }
   if (await users.findOne({ email })) return;
   if (await users.findOne({ username })) throw new Error('SEED_USERNAME is already assigned to another account');
-  await users.insertOne({ username, email, hash: await bcrypt.hash(password, 10), created: Date.now(), verified: true });
+  await users.insertOne({ username, email, hash: await hashPassword(password), created: Date.now(), verified: true });
   console.log(`Seed account created: @${username}`);
 }
 
@@ -300,11 +340,7 @@ const auth = (req, res, next) => {
   req.deviceId = claims.did || null;
   if (!req.deviceId) return next();
   deviceSessions.findOne({ _id: req.deviceId, userId: req.uid }).then(async device => {
-    if (!device) return res.status(401).json({ error: 'This device session is no longer available. Please sign in again.' });
-    if (device.revokedAt) {
-      await deviceSessions.updateOne({ _id: device._id, userId: req.uid }, { $unset: { revokedAt: '' } });
-      delete device.revokedAt;
-    }
+    if (!device || device.revokedAt) return res.status(401).json({ error: 'This device session is no longer available. Please sign in again.' });
     req.device = device;
     if (!device.lastSeenAt || Date.now() - device.lastSeenAt.getTime() > 5 * 60_000) {
       deviceSessions.updateOne({ _id: device._id }, { $set: { lastSeenAt: new Date() } }).catch(error => console.error('Unable to update device activity:', error));
@@ -337,13 +373,14 @@ async function notifyUser(userId, notification) {
 
 const attachmentUrlFromKey = (req, key) => {
   const raw = String(key || '').replace(/^\/+/, '');
-  if (!raw) return '';
-  if (r2Configured) return `https://placeholder.invalid/${raw}`;
+  if (!raw || !req?.uid) return '';
   const host = req?.get('host');
   const protocol = req?.secure ? 'https' : 'http';
   const base = process.env.PUBLIC_MEDIA_BASE_URL || (host ? `${protocol}://${host}` : 'http://localhost:4000');
-  if (gridFsConfigured) return `${base.replace(/\/$/, '')}/api/media?key=${encodeURIComponent(raw)}`;
-  return `${base.replace(/\/$/, '')}/uploads/${raw.replace(/^uploads\//, '')}`;
+  const expires = Math.floor(Date.now() / 1000) + 3600;
+  const signature = createHmac('sha256', JWT_SECRET).update(`${req.uid}:${expires}:${raw}`).digest('hex');
+  const query = new URLSearchParams({ key: raw, viewer: req.uid, expires: String(expires), signature });
+  return `${base.replace(/\/$/, '')}/api/media?${query}`;
 };
 
 async function messageView(message, req) {
@@ -358,7 +395,7 @@ async function messageView(message, req) {
   }));
   let replyTo = null;
   if (message.replyTo) {
-    const parent = await msgs.findOne({ _id: oid(message.replyTo) }, { projection: { from: 1, text: 1, attachments: 1, ts: 1 } });
+    const parent = await msgs.findOne({ _id: oid(message.replyTo), chatId: message.chatId }, { projection: { from: 1, text: 1, attachments: 1, ts: 1 } });
     if (parent) {
       replyTo = {
         id: String(parent._id),
@@ -391,13 +428,13 @@ app.get('/api/config', (_, res) => res.json({
   mediaEnabled: mediaEnabled,
 }));
 
-app.post('/api/register', wrap(async (req, res) => {
+app.post('/api/register', rateLimit('register', 5, 60 * 60_000), wrap(async (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase().replace(/^@/, '');
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
   if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username: 3-20 letters, numbers or _' });
   if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
-  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  if (!validNewPassword(password)) return res.status(400).json({ error: 'Password must be at least 8 characters and no more than 72 UTF-8 bytes' });
   if (!emailVerificationConfigured) return res.status(503).json({ error: 'Email verification is not configured. Set RESEND_API_KEY and RESEND_FROM (recommended), Gmail API credentials, or SMTP settings.' });
   if (await users.findOne({ $or: [{ email }, { username }] })) return res.status(409).json({ error: 'Email or username already in use' });
   const existing = await pendingUsers.findOne({ email });
@@ -412,7 +449,7 @@ app.post('/api/register', wrap(async (req, res) => {
     return res.status(502).json({ error: 'Could not send the verification email. Check the mail provider configuration and try again.' });
   }
   await pendingUsers.updateOne({ email }, { $set: {
-    username, email, hash: await bcrypt.hash(password, 10),
+    username, email, hash: await hashPassword(password),
     codeHash: createHmac('sha256', JWT_SECRET).update(email + ':' + code).digest('hex'),
     expiresAt: new Date(sentAt + 10 * 60_000), lastSentAt: sentAt, attempts: 0,
   } }, { upsert: true });
@@ -422,7 +459,7 @@ app.post('/api/register', wrap(async (req, res) => {
   });
 }));
 
-app.post('/api/verify-email', wrap(async (req, res) => {
+app.post('/api/verify-email', rateLimit('verify-email', 10, 15 * 60_000), wrap(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const code = String(req.body.code || '').trim();
   if (!emailRx.test(email) || !/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Enter the six-digit code sent to your email' });
@@ -451,12 +488,16 @@ app.post('/api/verify-email', wrap(async (req, res) => {
   }
 }));
 
-app.post('/api/login', wrap(async (req, res) => {
+app.post('/api/login', rateLimit('login', 10, 15 * 60_000), wrap(async (req, res) => {
   const device = deviceInput(req.body, res);
   if (!device) return;
   const id = String(req.body.email || '').trim().toLowerCase().replace(/^@/, '');
   const u = await users.findOne(id.includes('@') ? { email: id } : { username: id });
-  if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.hash))) return res.status(401).json({ error: 'Wrong email/username or password' });
+  const password = String(req.body.password || '');
+  if (!u || !(await bcrypt.compare(password, u.hash))) return res.status(401).json({ error: 'Wrong email/username or password' });
+  if (bcrypt.getRounds(u.hash) < 12) {
+    await users.updateOne({ _id: u._id, hash: u.hash }, { $set: { hash: await hashPassword(password) } });
+  }
   await loginWithDevice(res, u, device);
 }));
 
@@ -486,7 +527,7 @@ app.get('/api/devices', auth, wrap(async (req, res) => {
   })));
 }));
 
-app.post('/api/devices/pairing', wrap(async (req, res) => {
+app.post('/api/devices/pairing', rateLimit('device-pairing', 10, 15 * 60_000), wrap(async (req, res) => {
   const device = deviceInput(req.body, res);
   if (!device) return;
   const secret = randomBytes(32).toString('base64url');
@@ -501,7 +542,7 @@ app.post('/api/devices/pairing', wrap(async (req, res) => {
   res.status(201).json({ requestId, secret, deviceName: device.name, expiresAt: new Date(now.getTime() + 5 * 60_000) });
 }));
 
-app.post('/api/devices/pairing/:id/claim', wrap(async (req, res) => {
+app.post('/api/devices/pairing/:id/claim', rateLimit('device-pairing-claim', 30, 5 * 60_000), wrap(async (req, res) => {
   const secret = String(req.body.secret || '');
   if (!deviceIdRx.test(req.params.id) || secret.length < 40) return res.status(400).json({ error: 'Invalid device pairing request' });
   const pairing = await devicePairings.findOne({ _id: req.params.id });
@@ -564,10 +605,10 @@ app.post('/api/admin/users', auth, admin, wrap(async (req, res) => {
   const password = String(req.body.password || '');
   if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username: 3-20 letters, numbers or _' });
   if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (!validNewPassword(password)) return res.status(400).json({ error: 'Password must be at least 8 characters and no more than 72 UTF-8 bytes' });
   if (await users.findOne({ $or: [{ email }, { username }] })) return res.status(409).json({ error: 'Email or username already in use' });
   try {
-    const user = { username, email, hash: await bcrypt.hash(password, 10), created: Date.now(), verified: true, role: 'user' };
+    const user = { username, email, hash: await hashPassword(password), created: Date.now(), verified: true, role: 'user' };
     const result = await users.insertOne(user);
     res.status(201).json({ user: pub({ ...user, _id: result.insertedId }) });
   } catch (error) {
@@ -745,7 +786,7 @@ app.patch('/api/me/profile', auth, wrap(async (req, res) => {
   if (!current) return res.status(404).json({ error: 'Account not found' });
   if (!/^[a-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-20 letters, numbers, or underscores' });
   if (!emailRx.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
-  if (newPassword && newPassword.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  if (newPassword && !validNewPassword(newPassword)) return res.status(400).json({ error: 'New password must be at least 8 characters and no more than 72 UTF-8 bytes' });
   if (newPassword) {
     const currentPassword = String(req.body.currentPassword || '');
     if (!currentPassword || !await bcrypt.compare(currentPassword, current.hash)) return res.status(401).json({ error: 'Current password is incorrect' });
@@ -755,7 +796,7 @@ app.patch('/api/me/profile', auth, wrap(async (req, res) => {
     $or: [{ username }, { email }],
   })) return res.status(409).json({ error: 'Username or email is already in use' });
   const changes = { username, email };
-  if (newPassword) changes.hash = await bcrypt.hash(newPassword, 10);
+  if (newPassword) changes.hash = await hashPassword(newPassword);
   try {
     await users.updateOne({ _id: current._id }, { $set: changes });
   } catch (error) {
@@ -795,15 +836,40 @@ app.get('/api/users/:id/avatar', wrap(async (req, res) => {
 }));
 
 app.get('/api/media', wrap(async (req, res) => {
-  if (!gridFsConfigured) return res.status(404).end();
+  if (r2Configured) return res.status(404).end();
   const key = String(req.query.key || '');
-  const validKey = /^(?:activity\/[a-f0-9]{24}|profile\/[a-f0-9]{24}|[a-f0-9]{24}\/[a-f0-9]{24})\/[a-f0-9-]{36}\.(?:jpg|png|webp|gif|mp4|webm)$/.test(key);
+  const validKey = /^(?:activity\/[a-f0-9]{24}|[a-f0-9]{24}\/[a-f0-9]{24})\/[a-f0-9-]{36}\.(?:jpg|png|webp|gif|mp4|webm)$/.test(key);
   if (!validKey) return res.status(404).end();
+  const viewer = String(req.query.viewer || '');
+  const expires = Number(req.query.expires);
+  const supplied = String(req.query.signature || '');
+  const now = Math.floor(Date.now() / 1000);
+  if (!/^[a-f0-9]{24}$/.test(viewer) || !Number.isSafeInteger(expires) || expires < now || expires > now + 3600 ||
+    !/^[a-f0-9]{64}$/.test(supplied)) return res.status(404).end();
+  const expected = Buffer.from(createHmac('sha256', JWT_SECRET).update(`${viewer}:${expires}:${key}`).digest('hex'), 'hex');
+  const actual = Buffer.from(supplied, 'hex');
+  if (!timingSafeEqual(expected, actual)) return res.status(404).end();
+  const activityKey = key.startsWith('activity/');
+  if (activityKey) {
+    const post = await activityPosts.findOne({ attachments: { $elemMatch: { key } } }, { projection: { _id: 1 } });
+    if (!post || !await activityPostForViewer(String(post._id), viewer)) return res.status(404).end();
+  } else {
+    const [, chatId] = key.split('/');
+    const chat = await member(chatId, viewer);
+    if (!chat || !await msgs.findOne({ chatId, 'attachments.key': key }, { projection: { _id: 1 } })) return res.status(404).end();
+  }
+  res.set('Cache-Control', 'private, max-age=300');
+  res.set('X-Content-Type-Options', 'nosniff');
+  if (!gridFsConfigured) {
+    const filePath = path.resolve(localUploadsDir, key);
+    if (!filePath.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(404).end();
+    res.type(path.extname(key));
+    return res.sendFile(filePath);
+  }
   const file = await mediaFiles.findOne({ 'metadata.key': key });
   if (!file) return res.status(404).end();
   res.set('Content-Type', file.metadata?.contentType || 'application/octet-stream');
   res.set('Content-Length', String(file.length));
-  res.set('Cache-Control', 'public, max-age=3600');
   const stream = mediaBucket.openDownloadStream(file._id);
   stream.on('error', error => {
     console.error('Unable to stream stored media:', error);
@@ -1487,7 +1553,7 @@ io.use((s, next) => {
   s.deviceId = claims.did || null;
   if (!s.deviceId) return next();
   deviceSessions.findOne({ _id: s.deviceId, userId: s.uid }).then(device => {
-    if (!device) return next(new Error('auth'));
+    if (!device || device.revokedAt) return next(new Error('auth'));
     next();
   }).catch(error => {
     console.error('Unable to validate socket device session:', error);
@@ -1553,11 +1619,11 @@ io.on('connection', s => {
     const validateDevice = () => deviceSessions.findOne({
       _id: s.deviceId, userId: s.uid,
     }).then(device => {
-      if (!device) s.disconnect(true);
+      if (!device || device.revokedAt) s.disconnect(true);
     }).catch(error => console.error('Unable to revalidate socket device session:', error));
     s.use((_, next) => {
       deviceSessions.findOne({ _id: s.deviceId, userId: s.uid })
-        .then(device => next(device ? undefined : new Error('auth')))
+        .then(device => next(device && !device.revokedAt ? undefined : new Error('auth')))
         .catch(error => {
           console.error('Unable to validate socket device event:', error);
           next(new Error('auth'));

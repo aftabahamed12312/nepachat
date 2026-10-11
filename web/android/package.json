@@ -1,0 +1,11 @@
+{
+  "name": "nepachat-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Trusted Web Activity packaging for the NepaChat Android app.",
+  "scripts": {
+    "initialize": "npx --yes @bubblewrap/cli init --manifest=https://nepachat.aftabahamedbhat.com.np/manifest.webmanifest --directory=. && node ./apply-galaxy-install-referrer.mjs",
+    "update": "npx --yes @bubblewrap/cli update && node ./apply-galaxy-install-referrer.mjs",
+    "build": "node ./apply-galaxy-install-referrer.mjs && npx --yes @bubblewrap/cli build"
+  }
+}

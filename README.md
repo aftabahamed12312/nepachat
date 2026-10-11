@@ -9,6 +9,12 @@ Sign-up sends a six-digit email code that expires after 10 minutes; after verifi
 
 Features: verified accounts with username, email, and password; profile editing with profile pictures; automatic light/dark appearance matching the device theme, including navigation tabs; account sign-in on an unlimited number of devices; an account-scoped device-local cache for chats, messages, friends, activity posts and comments, call history, and public app settings, cleared when the user signs out; real-time chat with sent, delivered, and read checks, available only with accepted friends; live online and last-seen status shared with accepted friends; friend requests with accept/reject, searchable friend discovery, and a private Activity feed shared only between accepted friends, with likes, comments, share links, and author-only post deletion; R2-backed image/video attachments; one-to-one audio/video calls with minimize, split-screen, call history, and optional push alerts; opt-in, timed Google Maps live-location sharing; and installable phone PWA support. Location is visible only in its chat and automatically expires. Calls need camera/microphone permission and an HTTPS origin (localhost is also allowed); configure TURN for restrictive networks. Public website: https://nepachat.aftabahamedbhat.com.np.
 
+On iPhone or iPad, open the site in Safari, tap **Share**, select **Add to Home Screen**, then tap **Add**. The sign-in page also displays these steps on iOS devices that have not installed the app.
+
+## Prepare an Android app for Galaxy Store
+
+The live PWA can be packaged as an Android Trusted Web Activity. From `web/android`, follow its README to initialize the Bubblewrap project, create and back up a private signing key, build the signed AAB/APK, publish the Android Digital Asset Links association, and submit the package through Samsung Seller Portal. The permanent application ID selected for this listing is `nepachat.aftabahmedbhat.com.np`. Galaxy Store approval and required listing materials (including screenshots and a public privacy-policy URL) must be completed by the app owner in Seller Portal.
+
 The local cache supports offline viewing of previously loaded text and structured data. Sending messages, friend changes, activity actions, settings changes, and media transfers require a connection; media files themselves are not downloaded into the offline cache.
 
 To sign in on a new device, enter the account email/username and password; successful credentials create a device session. There is no device-count limit, and sessions are not remotely revocable from **Linked devices**; sign out on the device itself to end its local session. Linked devices share the existing account and server-synced chat history. Phone-number identity and SMS verification are not included. Messages are not end-to-end encrypted with the Signal Protocol; do not treat this multi-device feature as providing Signal-style encryption.
@@ -16,6 +22,14 @@ To sign in on a new device, enter the account email/username and password; succe
 Calls use browser WebRTC for SDP negotiation, trickle ICE, and DTLS-SRTP media encryption, with STUN and optional TURN relay configuration. Browser-managed DTLS-SRTP encrypts call media in transit, but NepaChat does not add independent peer identity verification or Signal Protocol call encryption. During a call, users can mute the microphone, enable browser-supported noise suppression and echo cancellation, turn video off, switch between available cameras, and view a connection-quality estimate based on WebRTC statistics.
 
 The local Docker setup seeds one verified demo account on first startup: `nepa_demo` / `nepa-demo@example.test` with password `local-demo-only-2026`. This fixed credential is for local development only. For a different seed, set `SEED_USERNAME`, `SEED_EMAIL`, and `SEED_PASSWORD`; the account is not modified on later starts. Never use the demo password in production. To seed a deployed API, configure those three Wrangler secrets separately.
+
+## Authentication and data access security
+
+New passwords are hashed with bcrypt (12 rounds); the API requires at least 8 characters and caps new passwords at bcrypt's 72-byte input limit. Login, registration, verification, device pairing, and API requests are rate-limited using MongoDB-backed counters so limits are shared across API instances. Keep MongoDB private and configure the API with a dedicated database user limited to read/write access on the NepaChat database; use Atlas network access controls rather than database administrator credentials.
+
+The API enforces ownership and membership checks for account, chat, activity, and location data. Locally stored and GridFS chat/activity media use expiring, viewer-bound links and are checked against current chat membership or activity visibility; profile photos remain public. R2 media uses expiring presigned URLs issued only after the same API authorization checks.
+
+This project uses MongoDB, which does not provide PostgreSQL-style row-level security (RLS) policies. RLS cannot be enabled by a MongoDB setting; row-level isolation is enforced in the API's authenticated, owner-scoped queries. If database-enforced RLS is a hard requirement, the persistence layer must move to a database with native RLS and have policies defined and tested there.
 
 ## Deploy the API to AWS Elastic Beanstalk
 

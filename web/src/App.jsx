@@ -255,8 +255,14 @@ function PasswordField({ label, value, onChange, autoComplete, minLength, requir
 
 function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
   const [mode, setMode] = useState(() => new URLSearchParams(window.location.search).get('auth') === 'signup' ? 'register' : 'login');
+  const [showIOSInstall, setShowIOSInstall] = useState(false);
   const [f, setF] = useState({ username: '', email: '', password: '' });
   const [err, setErr] = useState(''), [notice, setNotice] = useState(''), [awaitingCode, setAwaitingCode] = useState(false), [code, setCode] = useState('');
+  useEffect(() => {
+    const isIOS = /iPad|iPhone|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const isStandalone = navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+    setShowIOSInstall(isIOS && !isStandalone);
+  }, []);
   const set = k => e => setF({ ...f, [k]: e.target.value });
   const authenticateDevice = async (path, credentials) => {
     const device = { deviceId: getDeviceId(), deviceName: getDeviceName() };
@@ -311,7 +317,7 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
           <label>{mode === 'login' ? 'Email or username' : 'Email address'}<input type={mode === 'login' ? 'text' : 'email'} value={f.email} onChange={set('email')} placeholder="you@example.com" autoComplete={mode === 'login' ? 'username' : 'email'} required /></label>
           {mode === 'register' && awaitingCode
             ? <label>6-digit verification code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required /></label>
-            : <PasswordField label="Password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required />}
+            : <PasswordField label="Password" value={f.password} onChange={set('password')} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 8 : undefined} required />}
           {err && <div className="err">{err}</div>}
           {notice && <div className="notice">{notice}</div>}
           {mode === 'register' && !awaitingCode && !emailVerificationEnabled && <div className="err">Email verification is not configured on the server. Ask the administrator to set up an email provider.</div>}
@@ -321,6 +327,15 @@ function Auth({ onAuth, allowPublicSignUp, emailVerificationEnabled }) {
             ? <p className="sw">{mode === 'login' ? 'New here?' : 'Have an account?'} <a onClick={switchMode}>{mode === 'login' ? 'Create account' : 'Sign in'}</a></p>
             : <p className="sw">Account creation is managed by the owner.</p>}
         </form>
+          {showIOSInstall && <section className="ios-install" aria-labelledby="ios-install-title">
+            <h2 id="ios-install-title">Install NepaChat on your iPhone or iPad</h2>
+            <ol>
+              <li>Open this page in Safari.</li>
+              <li>Tap the Share button <span aria-label="Share">⎋</span> in Safari.</li>
+              <li>Choose <b>Add to Home Screen</b>, then tap <b>Add</b>.</li>
+            </ol>
+            <p>NepaChat will appear on your Home Screen and open like an app.</p>
+          </section>}
       </main>
     </div>
   );
