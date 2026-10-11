@@ -25,6 +25,8 @@ button,input,textarea{font:inherit}button{cursor:pointer}
 .profile-menu button{display:flex;align-items:center;gap:12px;width:100%;padding:10px;border:0;border-radius:9px;background:transparent;color:inherit;text-align:left;font-size:14px}
 .profile-menu button:hover{background:rgba(255,255,255,.1)}
 .profile-menu button>.anticon{width:18px;font-size:16px}
+.profile-menu-section{padding:4px 0;margin-bottom:5px;border-bottom:1px solid rgba(255,255,255,.12)}
+.profile-menu .profile-menu-count{display:grid;place-items:center;min-width:20px;height:20px;margin-left:auto;padding:0 6px;border-radius:10px;background:#25d366;color:#10231a;font-size:11px;font-weight:700}
 .profile-menu .profile-menu-signout{margin-top:5px;border-top:1px solid rgba(255,255,255,.12);border-radius:0 0 9px 9px;color:#ff9aa7}
 .app{display:grid;grid-template-columns:340px 1fr;grid-template-rows:auto 1fr;height:100%;max-width:1200px;margin:0 auto;border:1px solid var(--line)}
 .side{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
@@ -456,11 +458,13 @@ html,body,#root{min-width:0;min-height:100%}
 .app>.top .hbtn:hover{background:#2a3942;color:#25d366}
 .app>.top .hbtn .anticon,.side-nav .anticon,.mail .anticon,.attach .anticon,.send .anticon,.chat-call-icon .anticon,.chat-call-log button .anticon{display:block}
 .app>.side .side-nav button{display:flex;align-items:center;justify-content:center;gap:8px}
-.app>.side .search-wrap{display:flex;align-items:center;gap:10px;margin:10px;padding:0 14px;border:1px solid #2a3942;border-radius:24px;background:#202c33;color:#aebac1}
+.app>.side .search-wrap{display:flex;flex-direction:row;align-items:center;gap:10px;margin:10px;padding:0 14px;border:1px solid #2a3942;border-radius:24px;background:#202c33;color:#aebac1}
 .app>.side .search-wrap:focus-within{border-color:#00a884}
 .app>.side .search{flex:1;min-width:0;width:100%;margin:0;padding:11px 0;border:0;border-radius:0;background:transparent;color:#e9edef}
 .app>.side .search:focus{outline:none}
 .app>.side .search-wrap>.anticon{flex:none;font-size:15px}
+.app>.side .search-clear{display:grid;place-items:center;flex:none;width:28px;height:32px;padding:0;border:0;border-radius:50%;background:transparent;color:#aebac1}
+.app>.side .search-clear:hover{background:#2a3942;color:#e9edef}
 .app>.side .row{min-height:76px}
 .app>.side .row+.row{border-top:1px solid rgba(134,150,160,.12)}
 .app>.main .chead{min-height:68px}

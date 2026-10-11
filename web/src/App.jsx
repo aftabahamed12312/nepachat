@@ -2262,6 +2262,14 @@ export default function App() {
     setActive(null);
     setIsDraggingFiles(false);
   };
+  const openFriendPanel = panel => {
+    setProfileMenuOpen(false);
+    setActiveView('activity');
+    setActive(null);
+    setIsDraggingFiles(false);
+    setFriendPanel(panel);
+    setFriendError('');
+  };
   const sendFriendRequest = async user => {
     setFriendError('');
     setFriendActionId(user.id);
@@ -2601,6 +2609,12 @@ export default function App() {
           </button>
           {profileMenuOpen && <div className="profile-menu" role="menu" aria-label="Profile and tools">
             <div className="profile-menu-user"><Avatar name={me.username} avatarPath={me.avatarPath} /><div><b>@{me.username}</b><small>{me.email}</small></div></div>
+            <div className="profile-menu-section" aria-label="Friends">
+              <button role="menuitem" onClick={() => openFriendPanel('discover')}><UserAddOutlined /> <span>Find people</span></button>
+              <button role="menuitem" onClick={() => openFriendPanel('requests')}><UsergroupAddOutlined /> <span>Requests</span>{friendData.incoming.length > 0 && <span className="profile-menu-count">{friendData.incoming.length}</span>}</button>
+              <button role="menuitem" onClick={() => openFriendPanel('friends')}><TeamOutlined /> <span>Friends</span>{friendData.friends.length > 0 && <span className="profile-menu-count">{friendData.friends.length}</span>}</button>
+              <button role="menuitem" onClick={() => openFriendPanel('blocked')}><StopOutlined /> <span>Blocked</span>{friendData.blocked.length > 0 && <span className="profile-menu-count">{friendData.blocked.length}</span>}</button>
+            </div>
             <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setProfileOpen(true); }}><SettingOutlined /> <span>Profile settings</span></button>
             {me.role === 'admin' && <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setAdminUsersOpen(true); }}><TeamOutlined /> <span>View users</span></button>}
             {me.role === 'admin' && <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setAdminModal(true); }}><UserAddOutlined /> <span>Create account</span></button>}
@@ -2613,7 +2627,7 @@ export default function App() {
       </header>
       <aside className="side">
         {activeView === 'chats' && <>
-          <label className="search-wrap"><SearchOutlined aria-hidden="true" /><input className="search" aria-label="Search chats" placeholder="Search or start a new chat" value={filter} onChange={e => setFilter(e.target.value)} /></label>
+          <div className="search-wrap"><SearchOutlined aria-hidden="true" /><input className="search" aria-label="Search chats" placeholder="Search or start a new chat" value={filter} onChange={e => setFilter(e.target.value)} />{filter && <button className="search-clear" type="button" aria-label="Clear chat search" onClick={() => setFilter('')}><CloseOutlined /></button>}</div>
           <div className="list" ref={listScrollRef} onScroll={event => savePageScroll('listScrollTop', event.currentTarget.scrollTop)}>
             {!shown.length && <p className="muted pad">No chats yet. Tap <PlusOutlined /> to start one.</p>}
             {shown.map(c => (

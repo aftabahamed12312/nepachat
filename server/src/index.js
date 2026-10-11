@@ -409,9 +409,7 @@ const attachmentUrlFromKey = (req, key, viewerId = req?.uid) => {
   return `${base.replace(/\/$/, '')}/api/media?${query}`;
 };
 
-const attachmentUrl = (req, attachment, viewerId = req.uid) => r2Configured
-  ? getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 })
-  : Promise.resolve(attachmentUrlFromKey(req, attachment.key, viewerId));
+const attachmentUrl = (req, attachment, viewerId = req.uid) => attachmentUrlFromKey(req, attachment.key, viewerId);
 
 async function messageView(message, req, viewerId = req.uid) {
   const attachments = await Promise.all((message.attachments || []).map(async attachment => {
@@ -861,7 +859,6 @@ app.get('/api/users/:id/avatar', wrap(async (req, res) => {
 }));
 
 app.get('/api/media', wrap(async (req, res) => {
-  if (r2Configured) return res.status(404).end();
   const key = String(req.query.key || '');
   const validKey = /^(?:activity\/[a-f0-9]{24}|[a-f0-9]{24}\/[a-f0-9]{24})\/[a-f0-9-]{36}\.(?:jpg|png|webp|gif|mp4|webm)$/.test(key);
   if (!validKey) return res.status(404).end();
@@ -885,6 +882,33 @@ app.get('/api/media', wrap(async (req, res) => {
   }
   res.set('Cache-Control', 'private, max-age=300');
   res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Accept-Ranges', 'bytes');
+  if (r2Configured) {
+    let object;
+    try {
+      object = await r2.send(new GetObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: key,
+        ...(req.get('range') && { Range: req.get('range') }),
+      }));
+    } catch (error) {
+      if (['NoSuchKey', 'NotFound'].includes(error.name)) return res.status(404).end();
+      throw error;
+    }
+    if (!object.Body) return res.status(404).end();
+    res.set('Content-Type', object.ContentType || 'application/octet-stream');
+    if (object.ContentLength !== undefined) res.set('Content-Length', String(object.ContentLength));
+    if (object.ContentRange) {
+      res.status(206);
+      res.set('Content-Range', object.ContentRange);
+    }
+    object.Body.on('error', error => {
+      console.error('Unable to stream R2 media:', error);
+      if (res.headersSent) res.destroy(error);
+      else res.status(500).end();
+    });
+    return object.Body.pipe(res);
+  }
   if (!gridFsConfigured) {
     const filePath = path.resolve(localUploadsDir, key);
     if (!filePath.startsWith(`${localUploadsDir}${path.sep}`)) return res.status(404).end();
@@ -1313,9 +1337,7 @@ async function activityPostView(post, req, metrics = new Map(), viewerId = req.u
   const author = await users.findOne({ _id: oid(post.authorId) });
   const attachments = await Promise.all((post.attachments || []).map(async attachment => ({
     ...attachment,
-    url: r2Configured
-      ? await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: attachment.key }), { expiresIn: 3600 })
-      : attachmentUrlFromKey(req, attachment.key, viewerId),
+    url: attachmentUrlFromKey(req, attachment.key, viewerId),
   })));
   return {
     id: String(post._id),
