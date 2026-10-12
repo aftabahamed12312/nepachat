@@ -117,6 +117,7 @@ const r2Configured = Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCE
 const gridFsConfigured = !r2Configured && UPLOADS_PERSISTENT !== 'true' && NODE_ENV === 'production';
 const mediaEnabled = true;
 const mediaBucket = gridFsConfigured ? new GridFSBucket(db, { bucketName: 'media' }) : null;
+console.log(`Media storage: ${r2Configured ? 'R2' : gridFsConfigured ? 'MongoDB GridFS' : 'local filesystem'}`);
 const r2 = r2Configured ? new S3Client({
   region: 'auto',
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -859,26 +860,31 @@ app.get('/api/users/:id/avatar', wrap(async (req, res) => {
 }));
 
 app.get('/api/media', wrap(async (req, res) => {
+  const notFound = reason => {
+    console.warn(`Media request rejected: ${reason}`);
+    return res.status(404).end();
+  };
   const key = String(req.query.key || '');
   const validKey = /^(?:activity\/[a-f0-9]{24}|[a-f0-9]{24}\/[a-f0-9]{24})\/[a-f0-9-]{36}\.(?:jpg|png|webp|gif|mp4|webm)$/.test(key);
-  if (!validKey) return res.status(404).end();
+  if (!validKey) return notFound('invalid key');
   const viewer = String(req.query.viewer || '');
   const expires = Number(req.query.expires);
   const supplied = String(req.query.signature || '');
   const now = Math.floor(Date.now() / 1000);
   if (!/^[a-f0-9]{24}$/.test(viewer) || !Number.isSafeInteger(expires) || expires < now || expires > now + 3600 ||
-    !/^[a-f0-9]{64}$/.test(supplied)) return res.status(404).end();
+    !/^[a-f0-9]{64}$/.test(supplied)) return notFound('invalid or expired signature parameters');
   const expected = Buffer.from(createHmac('sha256', JWT_SECRET).update(`${viewer}:${expires}:${key}`).digest('hex'), 'hex');
   const actual = Buffer.from(supplied, 'hex');
-  if (!timingSafeEqual(expected, actual)) return res.status(404).end();
+  if (!timingSafeEqual(expected, actual)) return notFound('signature mismatch');
   const activityKey = key.startsWith('activity/');
   if (activityKey) {
     const post = await activityPosts.findOne({ attachments: { $elemMatch: { key } } }, { projection: { _id: 1 } });
-    if (!post || !await activityPostForViewer(String(post._id), viewer)) return res.status(404).end();
+    if (!post || !await activityPostForViewer(String(post._id), viewer)) return notFound('activity access denied');
   } else {
     const [, chatId] = key.split('/');
     const chat = await member(chatId, viewer);
-    if (!chat || !await msgs.findOne({ chatId, 'attachments.key': key }, { projection: { _id: 1 } })) return res.status(404).end();
+    if (!chat) return notFound('chat access denied');
+    if (!await msgs.findOne({ chatId, 'attachments.key': key }, { projection: { _id: 1 } })) return notFound('message attachment not found');
   }
   res.set('Cache-Control', 'private, max-age=300');
   res.set('X-Content-Type-Options', 'nosniff');
@@ -892,10 +898,10 @@ app.get('/api/media', wrap(async (req, res) => {
         ...(req.get('range') && { Range: req.get('range') }),
       }));
     } catch (error) {
-      if (['NoSuchKey', 'NotFound'].includes(error.name)) return res.status(404).end();
+      if (['NoSuchKey', 'NotFound'].includes(error.name)) return notFound('R2 object not found');
       throw error;
     }
-    if (!object.Body) return res.status(404).end();
+    if (!object.Body) return notFound('R2 response had no body');
     res.set('Content-Type', object.ContentType || 'application/octet-stream');
     if (object.ContentLength !== undefined) res.set('Content-Length', String(object.ContentLength));
     if (object.ContentRange) {
@@ -916,7 +922,7 @@ app.get('/api/media', wrap(async (req, res) => {
     return res.sendFile(filePath);
   }
   const file = await mediaFiles.findOne({ 'metadata.key': key });
-  if (!file) return res.status(404).end();
+  if (!file) return notFound('GridFS object not found');
   res.set('Content-Type', file.metadata?.contentType || 'application/octet-stream');
   res.set('Content-Length', String(file.length));
   const stream = mediaBucket.openDownloadStream(file._id);
