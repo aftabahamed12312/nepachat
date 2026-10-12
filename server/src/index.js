@@ -881,7 +881,7 @@ app.get('/api/media', wrap(async (req, res) => {
     const post = await activityPosts.findOne({ attachments: { $elemMatch: { key } } }, { projection: { _id: 1 } });
     if (!post || !await activityPostForViewer(String(post._id), viewer)) return notFound('activity access denied');
   } else {
-    const [, chatId] = key.split('/');
+    const [chatId] = key.split('/');
     const chat = await member(chatId, viewer);
     if (!chat) return notFound('chat access denied');
     if (!await msgs.findOne({ chatId, 'attachments.key': key }, { projection: { _id: 1 } })) return notFound('message attachment not found');
